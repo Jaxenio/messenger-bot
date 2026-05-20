@@ -16,6 +16,7 @@ const lockViolations = [];
 const autoReplies    = new Map();
 const groupStats     = new Map();
 const replyDelay     = { enabled: false, ms: 1500 };
+const globalLock     = { enabled: false };
 
 // FIX: Evict stale groups not seen in 30 days to prevent memory leak
 const STALE_GROUP_AGE_MS = 30 * 24 * 60 * 60 * 1000;
@@ -50,6 +51,7 @@ function _serialize() {
     autoReplies:   [...autoReplies.entries()].map(([tid, ar]) => [
       tid, { message: ar.message, enabled: ar.enabled, cooldownMs: ar.cooldownMs }
     ]),
+    globalLock:    globalLock.enabled,
   };
 }
 
@@ -78,7 +80,8 @@ function load() {
     for (const [tid, stats] of (data.groupStats || []))     groupStats.set(tid, stats);
     for (const [tid, ar] of (data.autoReplies || []))       autoReplies.set(tid, { ...ar, lastSent: new Map() });
     if (data.replyDelay) { replyDelay.enabled = !!data.replyDelay.enabled; replyDelay.ms = data.replyDelay.ms || 1500; }
-    logger.success("State", `Restored: ${lockedThreads.size} locked, ${mutedThreads.size} muted, ${groupsCache.size} groups.`);
+    if (data.globalLock !== undefined) globalLock.enabled = !!data.globalLock;
+    logger.success("State", `Restored: ${lockedThreads.size} locked, ${mutedThreads.size} muted, ${groupsCache.size} groups, globalLock=${globalLock.enabled}.`);
     // Run eviction on load to clean up any stale data from before fix
     evictStaleGroups();
   } catch (e) {
@@ -99,4 +102,4 @@ process.on("SIGTERM", save);
 process.on("exit",    save);
 load();
 
-module.exports = { lockedThreads, mutedThreads, groupsCache, activityLog, lockViolations, autoReplies, groupStats, replyDelay, save, load, evictStaleGroups };
+module.exports = { lockedThreads, mutedThreads, groupsCache, activityLog, lockViolations, autoReplies, groupStats, replyDelay, globalLock, save, load, evictStaleGroups };
