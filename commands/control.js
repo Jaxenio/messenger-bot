@@ -117,7 +117,11 @@ async function showRemoteMenu(api, replyTID, senderID, target) {
     handler: async (input, _api, _ev) => {
       const rTID = _ev.threadID;
       const rSID = _ev.senderID;
-      const ch   = input.trim();
+
+      // Normalize: Arabic-Indic numerals (٠١٢٣٤٥٦٧٨٩) → Western (0-9), then trim
+      const ch = input.trim()
+        .replace(/[٠-٩]/g, d => d.charCodeAt(0) - 0x0660)
+        .trim();
 
       // Cancel — no new handler, let index.js finally clean up
       if (ch === "00" || ch === "إلغاء") {
@@ -127,165 +131,197 @@ async function showRemoteMenu(api, replyTID, senderID, target) {
       // Back to list — handleRemote registers a new list handler, so KEEP
       if (ch === "0" || ch === "رجوع") {
         await handleRemote(_api, _ev);
-        return pendingReplies.KEEP; // FIX: protect the new list handler
+        return pendingReplies.KEEP;
       }
 
       switch (ch) {
 
-        // 1 — toggle lock (direct, no sub-handler)
+        // 1 — toggle lock → re-show updated menu so panel stays alive
         case "1":
-          if (isLocked) {
+          if (lockedThreads.has(target.threadID)) {
             lockedThreads.delete(target.threadID);
-            _api.sendMessage("✅ تم فتح قفل الرسائل في «" + target.name + "».", rTID);
+            await _api.sendMessage("✅ تم فتح قفل الرسائل في «" + target.name + "».", rTID);
             _api.sendMessage("🔓 تم فتح قفل الرسائل عن بُعد.", target.threadID).catch(() => {});
           } else {
             lockedThreads.add(target.threadID);
-            _api.sendMessage("✅ تم قفل الرسائل في «" + target.name + "».", rTID);
+            await _api.sendMessage("✅ تم قفل الرسائل في «" + target.name + "».", rTID);
             _api.sendMessage("🔒 تم قفل الرسائل عن بُعد.", target.threadID).catch(() => {});
           }
-          break;
+          await showRemoteMenu(_api, rTID, rSID, target);
+          return pendingReplies.KEEP;
 
         // 2 — toggle mute (sub-handler when setting duration)
         case "2":
-          if (isMuted) {
+          if ((mutedThreads.get(target.threadID) || 0) > Date.now()) {
             mutedThreads.delete(target.threadID);
-            _api.sendMessage("✅ تم رفع الكتم عن «" + target.name + "».", rTID);
+            await _api.sendMessage("✅ تم رفع الكتم عن «" + target.name + "».", rTID);
             _api.sendMessage("🔊 تم رفع الكتم عن بُعد.", target.threadID).catch(() => {});
+            await showRemoteMenu(_api, rTID, rSID, target);
+            return pendingReplies.KEEP;
           } else {
             await _api.sendMessage("⏱️ كم دقيقة تريد كتم «" + target.name + "»؟ (مثال: 30)", rTID);
             pendingReplies.set(rSID, {
               handler: async (inp, a2, ev2) => {
-                const mins = Math.max(1, parseInt(inp) || 60);
+                const mins = Math.max(1, parseInt(
+                  inp.replace(/[٠-٩]/g, d => d.charCodeAt(0) - 0x0660)
+                ) || 60);
                 mutedThreads.set(target.threadID, Date.now() + mins * 60000);
-                a2.sendMessage("✅ تم كتم «" + target.name + "» لمدة " + mins + " دقيقة.", ev2.threadID);
+                await a2.sendMessage("✅ تم كتم «" + target.name + "» لمدة " + mins + " دقيقة.", ev2.threadID);
                 a2.sendMessage("🔇 تم الكتم لمدة " + mins + " دقيقة عن بُعد.", target.threadID).catch(() => {});
+                await showRemoteMenu(a2, ev2.threadID, ev2.senderID, target);
+                return pendingReplies.KEEP;
               },
             });
-            return pendingReplies.KEEP; // FIX: protect the sub-handler
+            return pendingReplies.KEEP;
           }
-          break;
 
         // 3 — send message (sub-handler for message text)
         case "3":
           await _api.sendMessage("💬 اكتب الرسالة التي تريد إرسالها إلى «" + target.name + "»:", rTID);
           pendingReplies.set(rSID, {
             handler: async (msg, a2, ev2) => {
-              if (!msg.trim()) return a2.sendMessage("❌ رسالة فارغة، تم الإلغاء.", ev2.threadID);
-              try {
-                await a2.sendMessage(msg.trim(), target.threadID);
-                a2.sendMessage("✅ تم إرسال الرسالة إلى «" + target.name + "».", ev2.threadID);
-              } catch (e) {
-                a2.sendMessage("❌ فشل الإرسال: " + e.message, ev2.threadID);
+              if (!msg.trim()) {
+                await a2.sendMessage("❌ رسالة فارغة، تم الإلغاء.", ev2.threadID);
+              } else {
+                try {
+                  await a2.sendMessage(msg.trim(), target.threadID);
+                  await a2.sendMessage("✅ تم إرسال الرسالة إلى «" + target.name + "».", ev2.threadID);
+                } catch (e) {
+                  await a2.sendMessage("❌ فشل الإرسال: " + e.message, ev2.threadID);
+                }
               }
+              await showRemoteMenu(a2, ev2.threadID, ev2.senderID, target);
+              return pendingReplies.KEEP;
             },
           });
-          return pendingReplies.KEEP; // FIX: protect the sub-handler
+          return pendingReplies.KEEP;
 
         // 4 — rename (sub-handler for new name)
         case "4":
           if (lockedNames.has(target.threadID)) {
-            return _api.sendMessage("⛔ الاسم مقفل. استخدم الخيار 5 لرفع القفل أولاً.", rTID);
+            await _api.sendMessage("⛔ الاسم مقفل. استخدم الخيار 5 لرفع القفل أولاً.", rTID);
+            await showRemoteMenu(_api, rTID, rSID, target);
+            return pendingReplies.KEEP;
           }
           await _api.sendMessage("✏️ اكتب الاسم الجديد لـ «" + target.name + "»:", rTID);
           pendingReplies.set(rSID, {
             handler: async (newName, a2, ev2) => {
               const n = newName.trim();
-              if (!n) return a2.sendMessage("❌ اسم فارغ، تم الإلغاء.", ev2.threadID);
-              try {
-                await a2.gcname(n, target.threadID);
-                const c = groupsCache.get(target.threadID) || {};
-                groupsCache.set(target.threadID, { ...c, name: n });
-                a2.sendMessage("✅ تم تغيير الاسم إلى «" + n + "».", ev2.threadID);
-              } catch (e) {
-                a2.sendMessage("❌ فشل تغيير الاسم: " + e.message, ev2.threadID);
+              if (!n) {
+                await a2.sendMessage("❌ اسم فارغ، تم الإلغاء.", ev2.threadID);
+              } else {
+                try {
+                  await a2.gcname(n, target.threadID);
+                  const c = groupsCache.get(target.threadID) || {};
+                  groupsCache.set(target.threadID, { ...c, name: n });
+                  target.name = n;
+                  await a2.sendMessage("✅ تم تغيير الاسم إلى «" + n + "».", ev2.threadID);
+                } catch (e) {
+                  await a2.sendMessage("❌ فشل تغيير الاسم: " + e.message, ev2.threadID);
+                }
               }
+              await showRemoteMenu(a2, ev2.threadID, ev2.senderID, target);
+              return pendingReplies.KEEP;
             },
           });
-          return pendingReplies.KEEP; // FIX: protect the sub-handler
+          return pendingReplies.KEEP;
 
-        // 5 — toggle lockname (direct)
+        // 5 — toggle lockname → re-show updated menu
         case "5":
-          if (hasLockName) {
+          if (lockedNames.has(target.threadID)) {
             lockedNames.delete(target.threadID);
-            _api.sendMessage("✅ تم رفع قفل الاسم عن «" + target.name + "».", rTID);
+            await _api.sendMessage("✅ تم رفع قفل الاسم عن «" + target.name + "».", rTID);
             _api.sendMessage("🔓 تم رفع قفل الاسم عن بُعد.", target.threadID).catch(() => {});
           } else {
             lockedNames.set(target.threadID, target.name);
-            _api.sendMessage("✅ تم قفل الاسم «" + target.name + "» عن بُعد.", rTID);
+            await _api.sendMessage("✅ تم قفل الاسم «" + target.name + "» عن بُعد.", rTID);
             _api.sendMessage("🏷️ تم قفل الاسم على «" + target.name + "».", target.threadID).catch(() => {});
           }
-          break;
+          await showRemoteMenu(_api, rTID, rSID, target);
+          return pendingReplies.KEEP;
 
-        // 6 — stats (direct)
+        // 6 — stats → re-show menu so panel stays alive
         case "6": {
           const st   = groupStats.get(target.threadID) || { messageCount: 0, commandCount: 0, lastMessageAt: 0 };
           const last = st.lastMessageAt ? new Date(st.lastMessageAt).toLocaleString("ar-SA") : "لا يوجد";
-          _api.sendMessage([
+          await _api.sendMessage([
             "📊 إحصائيات «" + target.name + "»",
             "━━━━━━━━━━━━━━━",
             "📨 الرسائل  : " + st.messageCount,
             "⚡ الأوامر  : " + st.commandCount,
             "🕒 آخر نشاط: " + last,
           ].join("\n"), rTID);
-          break;
+          await showRemoteMenu(_api, rTID, rSID, target);
+          return pendingReplies.KEEP;
         }
 
-        // 7 — member info (direct)
+        // 7 — member info → re-show menu so panel stays alive
         case "7":
           try {
             const info = await _api.getThreadInfo(target.threadID);
-            _api.sendMessage(
+            await _api.sendMessage(
               "👥 «" + target.name + "»\n" +
               "الأعضاء : " + (info.participantIDs || []).length + "\n" +
               "المشرفون: " + (info.adminIDs || []).length,
               rTID
             );
           } catch (e) {
-            _api.sendMessage("❌ تعذّر جلب المعلومات: " + e.message, rTID);
+            await _api.sendMessage("❌ تعذّر جلب المعلومات: " + e.message, rTID);
           }
-          break;
+          await showRemoteMenu(_api, rTID, rSID, target);
+          return pendingReplies.KEEP;
 
-        // 8 — send panel to group (direct)
+        // 8 — send panel to group → re-show menu so panel stays alive
         case "8":
           try {
             await showPanel(_api, target.threadID);
-            _api.sendMessage("✅ تم إرسال لوحة التحكم إلى «" + target.name + "».", rTID);
+            await _api.sendMessage("✅ تم إرسال لوحة التحكم إلى «" + target.name + "».", rTID);
           } catch (e) {
-            _api.sendMessage("❌ فشل إرسال لوحة التحكم: " + e.message, rTID);
+            await _api.sendMessage("❌ فشل إرسال لوحة التحكم: " + e.message, rTID);
           }
-          break;
+          await showRemoteMenu(_api, rTID, rSID, target);
+          return pendingReplies.KEEP;
 
-        // 9 — autoreply (sub-handler only when setting from scratch)
-        case "9":
-          if (hasAR && ar.enabled) {
-            ar.enabled = false;
-            autoReplies.set(target.threadID, ar);
-            _api.sendMessage("✅ تم تعطيل الرد التلقائي في «" + target.name + "».", rTID);
-          } else if (hasAR && !ar.enabled) {
-            ar.enabled = true;
-            autoReplies.set(target.threadID, ar);
-            _api.sendMessage("✅ تم تفعيل الرد التلقائي في «" + target.name + "».", rTID);
+        // 9 — autoreply toggle or setup (sub-handler only when setting from scratch)
+        case "9": {
+          const curAR = autoReplies.get(target.threadID);
+          if (curAR && curAR.message && curAR.enabled) {
+            curAR.enabled = false;
+            autoReplies.set(target.threadID, curAR);
+            await _api.sendMessage("✅ تم تعطيل الرد التلقائي في «" + target.name + "».", rTID);
+            await showRemoteMenu(_api, rTID, rSID, target);
+            return pendingReplies.KEEP;
+          } else if (curAR && curAR.message && !curAR.enabled) {
+            curAR.enabled = true;
+            autoReplies.set(target.threadID, curAR);
+            await _api.sendMessage("✅ تم تفعيل الرد التلقائي في «" + target.name + "».", rTID);
+            await showRemoteMenu(_api, rTID, rSID, target);
+            return pendingReplies.KEEP;
           } else {
             await _api.sendMessage("🤖 اكتب رسالة الرد التلقائي لـ «" + target.name + "»:", rTID);
             pendingReplies.set(rSID, {
               handler: async (msg, a2, ev2) => {
                 const m = msg.trim();
-                if (!m) return a2.sendMessage("❌ رسالة فارغة، تم الإلغاء.", ev2.threadID);
-                const ex = autoReplies.get(target.threadID) || { lastSent: new Map(), cooldownMs: 30 * 60000 };
-                autoReplies.set(target.threadID, { ...ex, message: m, enabled: true });
-                a2.sendMessage("✅ تم تفعيل الرد التلقائي في «" + target.name + "»:\n" + m, ev2.threadID);
+                if (!m) {
+                  await a2.sendMessage("❌ رسالة فارغة، تم الإلغاء.", ev2.threadID);
+                } else {
+                  const ex = autoReplies.get(target.threadID) || { lastSent: new Map(), cooldownMs: 30 * 60000 };
+                  autoReplies.set(target.threadID, { ...ex, message: m, enabled: true });
+                  await a2.sendMessage("✅ تم تفعيل الرد التلقائي في «" + target.name + "»:\n" + m, ev2.threadID);
+                }
+                await showRemoteMenu(a2, ev2.threadID, ev2.senderID, target);
+                return pendingReplies.KEEP;
               },
             });
-            return pendingReplies.KEEP; // FIX: protect the sub-handler
+            return pendingReplies.KEEP;
           }
-          break;
+        }
 
         default:
-          _api.sendMessage("❌ خيار غير صحيح. اختر رقماً من القائمة.", rTID);
+          await _api.sendMessage("❌ خيار غير صحيح. اختر رقماً من 1 إلى 9، أو 0 للرجوع، أو 00 للإلغاء.", rTID);
+          await showRemoteMenu(_api, rTID, rSID, target);
+          return pendingReplies.KEEP;
       }
-
-      // Direct actions (1, 5, 6, 7, 8, and non-sub branches of 2/9)
-      // return undefined — index.js finally cleans up correctly ✅
     },
   });
 }
