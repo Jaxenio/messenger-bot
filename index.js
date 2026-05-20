@@ -22,7 +22,7 @@ const humanSimulator     = require("./utils/humanSimulator");
 const cookieRefresher    = require("./utils/cookieRefresher");
 const { login }          = require("@neoaz07/nkxfca");
 
-const { lockedThreads, mutedThreads, groupsCache, autoReplies, groupStats, replyDelay } = require("./state");
+const { lockedThreads, mutedThreads, groupsCache, autoReplies, groupStats, replyDelay, globalLock } = require("./state");
 const { setBotApi, setBotStatus, logActivity, logViolation, startApiServer, setCookieRefresher } = require("./api");
 const pendingReplies = require("./utils/pendingReplies");
 const threadScanner  = require("./utils/threadScanner");
@@ -177,6 +177,9 @@ async function handleMessage(api, event, commands) {
     if (Date.now() < until) return;
     mutedThreads.delete(threadID);
   }
+
+  // Global bot lock — only bot admins can use any command
+  if (globalLock.enabled && !isBotAdmin(senderID)) return;
 
   let cachedIsThreadAdmin = null;
   if (lockedThreads.has(threadID)) {
