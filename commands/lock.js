@@ -1,42 +1,62 @@
 "use strict";
 
+const { globalLock, save } = require("../state");
+
 module.exports = {
   name: "lock",
   aliases: ["botlock"],
-  description: "Lock the bot so only admins and moderators can use commands.",
+  description: "قفل البوت عالمياً — عند التفعيل يتجاهل البوت جميع الأوامر في كل المجموعات ولا يستجيب إلا لمدراء البوت.",
   usage: "lock [on|off|status]",
   category: "Admin",
-  groupOnly: true,
   adminOnly: true,
 
-  async execute({ api, event, args, lockedThreads }) {
+  async execute({ api, event, args }) {
     const { threadID } = event;
     const sub = (args[0] || "").toLowerCase();
-    const isLocked = lockedThreads.has(threadID);
 
     if (sub === "on") {
-      if (isLocked) return api.sendMessage("🔒 البوت مقفل بالفعل في هذه المجموعة.", threadID);
-      lockedThreads.add(threadID);
-      return api.sendMessage("🔒 تم تفعيل قفل البوت.\nلن يستجيب البوت إلا للمشرفين.", threadID);
+      if (globalLock.enabled)
+        return api.sendMessage("🔒 البوت مقفل عالمياً بالفعل.\nلا يستجيب إلا لمدراء البوت.", threadID);
+      globalLock.enabled = true;
+      save();
+      return api.sendMessage(
+        "🔒 تم تفعيل القفل العالمي للبوت.\nلن يستجيب البوت لأي أمر في أي مجموعة — فقط مدراء البوت يمكنهم استخدام الأوامر الآن.",
+        threadID
+      );
     }
 
     if (sub === "off") {
-      if (!isLocked) return api.sendMessage("🔓 البوت غير مقفل في هذه المجموعة.", threadID);
-      lockedThreads.delete(threadID);
-      return api.sendMessage("🔓 تم إلغاء قفل البوت.\nيمكن لجميع الأعضاء استخدام الأوامر الآن.", threadID);
+      if (!globalLock.enabled)
+        return api.sendMessage("🔓 البوت غير مقفل عالمياً.", threadID);
+      globalLock.enabled = false;
+      save();
+      return api.sendMessage(
+        "🔓 تم إلغاء القفل العالمي للبوت.\nيمكن لجميع الأعضاء استخدام الأوامر مجدداً.",
+        threadID
+      );
     }
 
     if (sub === "status") {
-      const state = isLocked ? "🔒 مقفل — المشرفون فقط" : "🔓 مفتوح — جميع الأعضاء";
-      return api.sendMessage("حالة البوت في هذه المجموعة:\n" + state, threadID);
+      const state = globalLock.enabled
+        ? "🔒 مقفل عالمياً — مدراء البوت فقط"
+        : "🔓 مفتوح — جميع الأعضاء";
+      return api.sendMessage("حالة القفل العالمي للبوت:\n" + state, threadID);
     }
 
     // No arg: toggle
-    if (isLocked) {
-      lockedThreads.delete(threadID);
-      return api.sendMessage("🔓 تم إلغاء قفل البوت.\nيمكن لجميع الأعضاء استخدام الأوامر الآن.", threadID);
+    if (globalLock.enabled) {
+      globalLock.enabled = false;
+      save();
+      return api.sendMessage(
+        "🔓 تم إلغاء القفل العالمي للبوت.\nيمكن لجميع الأعضاء استخدام الأوامر مجدداً.",
+        threadID
+      );
     }
-    lockedThreads.add(threadID);
-    return api.sendMessage("🔒 تم تفعيل قفل البوت.\nلن يستجيب البوت إلا للمشرفين.", threadID);
+    globalLock.enabled = true;
+    save();
+    return api.sendMessage(
+      "🔒 تم تفعيل القفل العالمي للبوت.\nلن يستجيب البوت لأي أمر في أي مجموعة — فقط مدراء البوت يمكنهم استخدام الأوامر الآن.",
+      threadID
+    );
   },
 };
