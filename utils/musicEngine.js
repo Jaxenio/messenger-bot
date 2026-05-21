@@ -49,9 +49,14 @@ function _findFfmpeg() {
   if (process.env.FFMPEG_PATH && fs.existsSync(process.env.FFMPEG_PATH)) {
     return process.env.FFMPEG_PATH;
   }
+  // `which` resolves the current nix store path dynamically
+  try {
+    const { execSync } = require("child_process");
+    const p = execSync("which ffmpeg", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    if (p && fs.existsSync(p)) return p;
+  } catch {}
   const HOME = process.env.HOME || "/root";
   const candidates = [
-    "/nix/store/y7m7h744qpw8hidkkxnhx7wzgv59w287-replit-runtime-path/bin/ffmpeg",
     "/usr/bin/ffmpeg",
     "/usr/local/bin/ffmpeg",
     path.join(HOME, ".nix-profile/bin/ffmpeg"),
@@ -211,50 +216,82 @@ async function searchYouTube(query) {
   };
 }
 
-// Shared download — uses yt-dlp with 4 player-client retries → mp3
+// Shared download — yt-dlp (web client, no PO-token needed) → raw audio → ffmpeg → mp3
+//
+// Two-step: Step 1 downloads the best audio stream (m4a/webm) via yt-dlp WITHOUT
+// invoking ffmpeg (no -x flag), so yt-dlp doesn't need ffprobe.  Step 2 converts
+// the raw file to mp3 using the system ffmpeg.  Falls back to the combined mp4
+// stream (format 18) if audio-only tracks fail.
 async function downloadYouTube(url, outPath) {
   const bin    = await withTimeout(_ensureYtDlp(), 95_000, "تجهيز yt-dlp");
   const ffmpeg = _findFfmpeg();
 
-  // yt-dlp writes to <template>.mp3 after extraction.
-  // We strip the .mp3 from the template so it doesn't double-extend.
+  // Base without extension — yt-dlp will append .m4a / .webm etc.
   const base = outPath.endsWith(".mp3") ? outPath.slice(0, -4) : outPath;
 
-  const BASE_ARGS = [
+  // Format priority: high-quality m4a → webm → any audio-only → combined mp4
+  const FORMAT_CHAINS = [
+    "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+    "18",   // combined 360p mp4 fallback — audio is always present
+  ];
+
+  const YTDLP_BASE = [
     "--no-playlist",
-    "-x", "--audio-format", "mp3", "--audio-quality", "128k",
-    "--ffmpeg-location", ffmpeg,
     "--no-part", "--no-cache-dir",
     "--quiet", "--no-warnings",
     "--force-ipv4", "--geo-bypass", "--no-check-certificates",
     "--socket-timeout", "30",
-    "-o", base,          // yt-dlp appends .mp3 → base.mp3 === outPath
   ];
 
-  let lastError = null;
-  for (let i = 0; i < YT_CLIENTS.length; i++) {
-    const client = YT_CLIENTS[i];
-    try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); } catch {}
+  // Try each format chain until we have a raw file on disk
+  let rawFile = null;
+  let lastErr  = null;
+  const RAW_EXTS = ["m4a", "webm", "mp4", "opus", "ogg", "aac"];
 
-    logger.info("MusicEngine", `yt-dlp client=${client}: ${url.slice(-15)}`);
+  for (const fmt of FORMAT_CHAINS) {
+    // Remove any leftover temp files from a previous attempt
+    for (const ext of RAW_EXTS) { try { fs.unlinkSync(`${base}.${ext}`); } catch {} }
+
+    logger.info("MusicEngine", `yt-dlp fmt="${fmt}": ${url.slice(-15)}`);
     try {
       await withTimeout(
-        _spawnAsync(bin, [...BASE_ARGS, "--extractor-args", `youtube:player_client=${client}`, url],
+        _spawnAsync(bin, [...YTDLP_BASE, "-f", fmt, "-o", `${base}.%(ext)s`, url],
           { timeout: DOWNLOAD_TIMEOUT }),
-        DOWNLOAD_TIMEOUT + 5_000, `تحميل (${client})`
+        DOWNLOAD_TIMEOUT + 5_000, `تحميل (${fmt})`
       );
-      if (fs.existsSync(outPath) && fs.statSync(outPath).size > 1024) {
-        logger.success("MusicEngine", `OK client=${client}: ${path.basename(outPath)}`);
-        return;
+      for (const ext of RAW_EXTS) {
+        const fp = `${base}.${ext}`;
+        if (fs.existsSync(fp) && fs.statSync(fp).size > 10_240) { rawFile = fp; break; }
       }
-      throw new Error("الملف مفقود أو فارغ بعد التحميل");
+      if (rawFile) break;
+      throw new Error("output file missing or empty after download");
     } catch (e) {
-      lastError = e;
-      logger.warn("MusicEngine", `client=${client} failed: ${e.message.slice(0, 100)}`);
-      if (i < YT_CLIENTS.length - 1) await sleep(Math.min(500 * (2 ** i), 3000));
+      lastErr = e;
+      logger.warn("MusicEngine", `fmt="${fmt}" failed: ${e.message.slice(0, 120)}`);
     }
   }
-  throw new Error(lastError?.message || "yt-dlp: كل العملاء فشلوا");
+
+  if (!rawFile) throw new Error(lastErr?.message || "yt-dlp: تعذّر إيجاد stream صالح");
+
+  // Step 2: convert raw audio to mp3 with ffmpeg
+  logger.info("MusicEngine",
+    `ffmpeg: ${path.extname(rawFile)} → mp3  [${path.basename(rawFile)}]`);
+  try {
+    await withTimeout(
+      _spawnAsync(ffmpeg,
+        ["-i", rawFile, "-vn", "-ar", "44100", "-ac", "2", "-b:a", "128k", "-f", "mp3", "-y", outPath],
+        { timeout: 60_000 }),
+      65_000, "ffmpeg convert"
+    );
+  } finally {
+    try { fs.unlinkSync(rawFile); } catch {}
+  }
+
+  if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1024) {
+    throw new Error("ffmpeg produced empty or missing mp3");
+  }
+  logger.success("MusicEngine",
+    `Ready: ${path.basename(outPath)} (${Math.round(fs.statSync(outPath).size / 1024)}KB)`);
 }
 
 // ── Provider 2: YouTube Music via internal API ────────────────────────────────
