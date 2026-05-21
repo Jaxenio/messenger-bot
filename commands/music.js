@@ -7,7 +7,7 @@ const engine = require("../utils/musicEngine");
 module.exports = {
   name:        "music",
   aliases:     ["song", "اغنية", "أغنية", "mp3"],
-  description: "البحث عن أغنية وإرسالها كملف صوتي (YouTube أو YouTube Music كاحتياط).",
+  description: "البحث عن أغنية وإرسالها كملف صوتي.",
   usage:       "music [اسم الأغنية أو الفنان]",
   category:    "Entertainment",
 
@@ -35,63 +35,60 @@ module.exports = {
 
     await api.sendMessage(`🔍 جاري البحث عن: ${query}...`, threadID).catch(() => {});
 
-    // ── Step 1: Search (YouTube → YouTube Music fallback) ─────────────────────
-    let track;
-    let provider = "youtube";
-
-    try {
-      track = await engine.searchYouTube(query);
-    } catch {
-      try {
-        track    = await engine.searchYouTubeMusic(query);
-        provider = "ytmusic";
-      } catch {
-        return api.sendMessage(`😕 لم أجد نتائج لـ: ${query}`, threadID).catch(() => {});
-      }
-    }
-
-    // ── Step 2: Notify & download ─────────────────────────────────────────────
     const outPath = path.join(
       engine.TMP_DIR,
       `music_${Date.now()}_${Math.random().toString(36).slice(2)}.mp3`
     );
 
-    const sourceLabel = provider === "ytmusic" ? "📦 YouTube Music" : "📦 YouTube";
-
-    await api.sendMessage(
-      `🎵 ${track.title}` +
-      (track.artist   ? `\n🎤 ${track.artist}`   : "") +
-      (track.duration ? `\n⏱ ${track.duration}` : "") +
-      `\n${sourceLabel}` +
-      "\n⬇️ جاري التحميل...",
-      threadID
-    ).catch(() => {});
+    // ── Step 1: Try YouTube (search → download with 3-method fallback chain) ──
+    let track    = null;
+    let provider = "youtube";
+    let downloaded = false;
 
     try {
+      // Search YouTube first, then YouTube Music as search fallback
+      try {
+        track = await engine.searchYouTube(query);
+      } catch {
+        track    = await engine.searchYouTubeMusic(query);
+        provider = "ytmusic";
+      }
+
+      await api.sendMessage(
+        `🎵 ${track.title}` +
+        (track.artist   ? `\n🎤 ${track.artist}`   : "") +
+        (track.duration ? `\n⏱ ${track.duration}` : "") +
+        `\n📦 ${provider === "ytmusic" ? "YouTube Music" : "YouTube"}` +
+        "\n⬇️ جاري التحميل...",
+        threadID
+      ).catch(() => {});
+
+      // downloadYouTube tries ytdl-core → play-dl → yt-dlp internally
       await engine.downloadYouTube(track.url, outPath);
-    } catch (dlErr) {
-      // Primary download failed — if we used YouTube, retry with YouTube Music
-      if (provider === "youtube") {
-        try {
-          const ytmTrack = await engine.searchYouTubeMusic(
-            track.title + (track.artist ? " " + track.artist : "")
-          );
-          await engine.downloadYouTube(ytmTrack.url, outPath);
-          track    = ytmTrack;
-          provider = "ytmusic";
-        } catch {
-          return api.sendMessage(
-            "❌ فشل التحميل من YouTube ومن YouTube Music:\n" + dlErr.message.slice(0, 200),
-            threadID
-          ).catch(() => {});
-        }
-      } else {
+      downloaded = true;
+    } catch (ytErr) {
+      // ── Step 2: All YouTube methods failed → try SoundCloud ─────────────────
+      await api.sendMessage(
+        "⚠️ YouTube محجوب، جاري المحاولة عبر SoundCloud...",
+        threadID
+      ).catch(() => {});
+
+      try {
+        const scTrack = await engine.downloadSoundCloud(query, outPath);
+        track    = scTrack;
+        provider = "soundcloud";
+        downloaded = true;
+      } catch (scErr) {
         return api.sendMessage(
-          "❌ فشل التحميل:\n" + dlErr.message.slice(0, 200),
+          "❌ فشل التحميل من جميع المصادر:\n" +
+          `YouTube: ${ytErr.message.slice(0, 150)}\n` +
+          `SoundCloud: ${scErr.message.slice(0, 100)}`,
           threadID
         ).catch(() => {});
       }
     }
+
+    if (!downloaded) return;
 
     // ── Step 3: Validate & send ───────────────────────────────────────────────
     try {
@@ -101,11 +98,16 @@ module.exports = {
       return api.sendMessage("❌ " + e.message, threadID).catch(() => {});
     }
 
+    const sourceLabel =
+      provider === "soundcloud" ? "🎧 SoundCloud" :
+      provider === "ytmusic"    ? "📦 YouTube Music" :
+                                  "📦 YouTube";
+
     const caption =
       `🎵 ${track.title}` +
       (track.artist   ? `\n🎤 ${track.artist}`   : "") +
       (track.duration ? `\n⏱ ${track.duration}` : "") +
-      (provider === "ytmusic" ? "\n📦 YouTube Music" : "");
+      `\n${sourceLabel}`;
 
     try {
       await Promise.race([
