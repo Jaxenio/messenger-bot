@@ -2,38 +2,35 @@
 
 /**
  * ui.js — نظام التنسيق الموحّد لمادوكس
- * كل رسائل البوت تمر من هنا لضمان هوية بصرية واحدة
+ * هادئ · منظّم · غير مبالغ فيه
  */
 
-const LINE  = "━━━━━━━━━━━━━━━━━━━━━━━━━";
-const LINE2 = "─────────────────────────";
+const DIV  = "─────────────────────────";
+const MARK = "❏";
 
-/** عنوان قسم */
-function header(emoji, title) {
-  return `${LINE}\n${emoji}  ${title}\n${LINE}`;
+/** عنوان قسم رئيسي */
+function header(title) {
+  return `${MARK} ${title}\n${DIV}`;
 }
 
-/** فاصل خفيف */
-function divider() { return LINE2; }
-
-/** زوج مفتاح ← قيمة */
+/** زوج مفتاح · قيمة */
 function row(label, value) {
-  return `${label}  ›  ${value}`;
+  return `${label}  ·  ${value}`;
 }
 
 /** رسالة نجاح */
-function ok(text)   { return `✅  ${text}`; }
+function ok(text)   { return `✓  ${text}`; }
 
 /** رسالة خطأ */
-function err(text)  { return `❌  ${text}`; }
+function err(text)  { return `✗  ${text}`; }
 
 /** رسالة تحذير */
-function warn(text) { return `⚠️  ${text}`; }
+function warn(text) { return `!  ${text}`; }
 
 /** رسالة حظر */
-function ban(text)  { return `🚫  ${text}`; }
+function ban(text)  { return `✗  ${text}`; }
 
-/** رسالة معلومة */
-function info(text) { return `ℹ️  ${text}`; }
+/** فاصل */
+function divider()  { return DIV; }
 
-module.exports = { LINE, LINE2, header, divider, row, ok, err, warn, ban, info };
+module.exports = { DIV, MARK, header, row, ok, err, warn, ban, divider };
