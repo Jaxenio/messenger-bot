@@ -61,11 +61,15 @@ function _findFfmpeg() {
     "/usr/local/bin/ffmpeg",
     path.join(HOME, ".nix-profile/bin/ffmpeg"),
     "/nix/var/nix/profiles/default/bin/ffmpeg",
-    "ffmpeg",
   ];
   for (const p of candidates) {
-    try { if (p === "ffmpeg" || fs.statSync(p).isFile()) return p; } catch {}
+    try { if (fs.statSync(p).isFile()) return p; } catch {}
   }
+  // ffmpeg-static: bundled binary shipped with npm package (no system install needed)
+  try {
+    const staticPath = require("ffmpeg-static");
+    if (staticPath && fs.existsSync(staticPath)) return staticPath;
+  } catch {}
   return "ffmpeg";
 }
 
