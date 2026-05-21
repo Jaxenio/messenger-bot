@@ -1,6 +1,6 @@
 "use strict";
 
-const { LINE, LINE2, err, row } = require("../utils/ui");
+const { DIV, MARK, row, err } = require("../utils/ui");
 
 module.exports = {
   name: "members",
@@ -33,45 +33,33 @@ module.exports = {
 
     const lines = ids.map((id, i) => {
       const name    = userInfo[id]?.name || id;
-      const isAdmin = adminIDs.includes(id) ? "  👑" : "";
-      return `  ${i + 1}.  ${name}${isAdmin}`;
+      const isAdmin = adminIDs.includes(id) ? "  ❏" : "";
+      return `  ${i + 1}. ${name}${isAdmin}`;
     });
 
     const header = [
-      LINE,
-      `👥  أعضاء المجموعة`,
-      LINE,
-      ``,
-      row("الاسم ", info.name || "غير مسمّاة"),
-      row("العدد ", `${ids.length} عضو`),
-      ``,
-      LINE2,
+      `${MARK} أعضاء المجموعة`,
+      DIV,
+      row("الاسم", info.name || "غير مسمّاة"),
+      row("العدد", `${ids.length} عضو`),
+      DIV,
     ].join("\n");
 
     const MAX = 3800;
     const fullMsg = header + "\n" + lines.join("\n");
 
-    if (fullMsg.length <= MAX) {
-      return api.sendMessage(fullMsg, event.threadID);
-    }
+    if (fullMsg.length <= MAX) return api.sendMessage(fullMsg, event.threadID);
 
     const chunks = [];
     let buf = header;
     for (const line of lines) {
-      if ((buf + "\n" + line).length > MAX) {
-        chunks.push(buf);
-        buf = line;
-      } else {
-        buf += "\n" + line;
-      }
+      if ((buf + "\n" + line).length > MAX) { chunks.push(buf); buf = line; }
+      else buf += "\n" + line;
     }
     if (buf) chunks.push(buf);
 
     for (let i = 0; i < chunks.length; i++) {
-      await api.sendMessage(
-        `[${i + 1}/${chunks.length}]\n${chunks[i]}`,
-        event.threadID
-      ).catch(() => {});
+      await api.sendMessage(`[${i + 1}/${chunks.length}]\n${chunks[i]}`, event.threadID).catch(() => {});
       if (i < chunks.length - 1) await new Promise(r => setTimeout(r, 500));
     }
   },
