@@ -2,7 +2,7 @@
 
 const config      = require("../config.json");
 const warnManager = require("../utils/warnManager");
-const { LINE2, ok, err, warn: warnFmt, row } = require("../utils/ui");
+const { DIV, MARK, row, ok, err } = require("../utils/ui");
 
 const MAX_WARNS = 3;
 
@@ -11,11 +11,11 @@ module.exports = {
   aliases: ["w", "تحذير"],
   description: "إصدار تحذير لعضو. عند بلوغ الحد يُطرد تلقائياً.",
   usage: [
-    "-warn @عضو [السبب]       — إصدار تحذير",
-    "-warn check @عضو         — عرض تحذيرات عضو",
-    "-warn clear @عضو         — مسح تحذيرات عضو",
-    "-warn clearall            — مسح تحذيرات المجموعة",
-    "-warn list                — قائمة التحذيرات النشطة",
+    "-warn @عضو [السبب]",
+    "-warn check @عضو",
+    "-warn clear @عضو",
+    "-warn clearall",
+    "-warn list",
   ].join("\n"),
   category: "Admin",
   groupOnly: true,
@@ -31,29 +31,19 @@ module.exports = {
     // ── check ────────────────────────────────────────────────────────────────
     if (sub === "check") {
       if (!mentionIDs.length) {
-        return api.sendMessage(err(`اذكر عضواً. مثال: ${prefix}warn check @عضو`), threadID);
+        return api.sendMessage(err(`اذكر عضواً.\nمثال: ${prefix}warn check @عضو`), threadID);
       }
       const uid  = mentionIDs[0];
       const name = (Object.values(mentions)[0] || "").replace(/@/, "") || uid;
       const w    = warnManager.getWarns(threadID, uid);
 
-      if (w.count === 0) {
-        return api.sendMessage(ok(`لا توجد تحذيرات بحق ${name}.`), threadID);
-      }
+      if (w.count === 0) return api.sendMessage(ok(`لا توجد تحذيرات بحق ${name}.`), threadID);
 
       const lines = w.reasons.slice(-5).map((r, i) =>
         `  ${i + 1}. ${r.reason}  (${new Date(r.at).toLocaleDateString("ar-SA")})`
       );
       return api.sendMessage(
-        [
-          warnFmt(`تحذيرات ${name}`),
-          ``,
-          row("العدد ", `${w.count} / ${MAX_WARNS}`),
-          ``,
-          LINE2,
-          `آخر التحذيرات:`,
-          ...lines,
-        ].join("\n"),
+        [`${MARK} تحذيرات ${name}`, DIV, row("العدد", `${w.count} / ${MAX_WARNS}`), ``, ...lines].join("\n"),
         threadID
       );
     }
@@ -61,7 +51,7 @@ module.exports = {
     // ── clear ────────────────────────────────────────────────────────────────
     if (sub === "clear") {
       if (!mentionIDs.length) {
-        return api.sendMessage(err(`اذكر عضواً. مثال: ${prefix}warn clear @عضو`), threadID);
+        return api.sendMessage(err(`اذكر عضواً.\nمثال: ${prefix}warn clear @عضو`), threadID);
       }
       const uid  = mentionIDs[0];
       const name = (Object.values(mentions)[0] || "").replace(/@/, "") || uid;
@@ -72,28 +62,25 @@ module.exports = {
     // ── clearall ──────────────────────────────────────────────────────────────
     if (sub === "clearall") {
       warnManager.clearWarns(threadID, null);
-      return api.sendMessage(ok("تم مسح جميع التحذيرات في هذه المجموعة."), threadID);
+      return api.sendMessage(ok("تم مسح جميع التحذيرات في المجموعة."), threadID);
     }
 
     // ── list ──────────────────────────────────────────────────────────────────
     if (sub === "list") {
       const all = warnManager.listWarns(threadID);
-      if (!all.length) return api.sendMessage(ok("لا توجد تحذيرات نشطة في المجموعة."), threadID);
+      if (!all.length) return api.sendMessage(ok("لا توجد تحذيرات نشطة."), threadID);
       const lines = all
         .sort((a, b) => b.count - a.count)
-        .map((w, i) => `  ${i + 1}. ${w.userID}  ›  ${w.count}/${MAX_WARNS} تحذير`);
+        .map((w, i) => `  ${i + 1}. ${w.userID}  ·  ${w.count}/${MAX_WARNS}`);
       return api.sendMessage(
-        [`⚠️  التحذيرات النشطة (${all.length})`, LINE2, ...lines].join("\n"),
+        [`${MARK} التحذيرات النشطة  (${all.length})`, DIV, ...lines].join("\n"),
         threadID
       );
     }
 
     // ── إصدار تحذير ──────────────────────────────────────────────────────────
     if (!mentionIDs.length) {
-      return api.sendMessage(
-        err(`اذكر العضو. مثال: ${prefix}warn @عضو السبب`),
-        threadID
-      );
+      return api.sendMessage(err(`اذكر العضو.\nمثال: ${prefix}warn @عضو السبب`), threadID);
     }
 
     const uid    = mentionIDs[0];
@@ -114,37 +101,28 @@ module.exports = {
         await api.gcmember("remove", uid, threadID);
         warnManager.clearWarns(threadID, uid);
         return api.sendMessage(
-          [
-            `🚫  تم الطرد التلقائي`,
-            ``,
-            row("العضو ", name),
-            row("السبب ", reason),
-            row("التحذيرات", `${MAX_WARNS}/${MAX_WARNS}`),
-          ].join("\n"),
+          [`${MARK} طرد تلقائي`, DIV, row("العضو ", name), row("السبب ", reason), row("التحذيرات", `${MAX_WARNS}/${MAX_WARNS}`)].join("\n"),
           threadID
         );
       } catch (e) {
         return api.sendMessage(
-          [
-            warnFmt(`${name} بلغ الحد الأقصى — الطرد فشل`),
-            ``,
-            row("الخطأ ", e.message),
-            ``,
-            `يُرجى طرده يدوياً.`,
-          ].join("\n"),
+          [`${MARK} تجاوز الحد — الطرد فشل`, DIV, row("العضو ", name), row("الخطأ ", e.message), ``, `يُرجى طرده يدوياً.`].join("\n"),
           threadID
         );
       }
     }
 
     const lines = [
-      `⚠️  تحذير رسمي`,
-      ``,
+      `${MARK} تحذير رسمي`,
+      DIV,
       row("العضو      ", name),
       row("السبب      ", reason),
       row("التحذيرات  ", `${w.count} / ${MAX_WARNS}`),
     ];
-    if (remaining === 1) lines.push(``, `🚨  تحذير واحد متبقٍ قبل الطرد التلقائي!`);
+    if (remaining === 1) {
+      lines.push(DIV);
+      lines.push(`تحذير واحد متبقٍ قبل الطرد التلقائي.`);
+    }
 
     api.sendMessage(lines.join("\n"), threadID);
   },
