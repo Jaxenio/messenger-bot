@@ -1,6 +1,6 @@
 "use strict";
 
-const { row } = require("../utils/ui");
+const { MARK, DIV, row } = require("../utils/ui");
 
 module.exports = {
   name: "coinflip",
@@ -10,10 +10,9 @@ module.exports = {
   category: "Fun",
 
   async execute({ api, event }) {
-    const isHeads = Math.random() < 0.5;
-    const result  = isHeads ? "وجه 🌕" : "ظهر 🌑";
+    const result = Math.random() < 0.5 ? "وجه" : "ظهر";
     api.sendMessage(
-      [`🪙  رمي العملة`, ``, row("النتيجة", result)].join("\n"),
+      [`${MARK} رمي العملة`, DIV, row("النتيجة", result)].join("\n"),
       event.threadID
     );
   },
