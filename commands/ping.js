@@ -1,6 +1,6 @@
 "use strict";
 
-const { row } = require("../utils/ui");
+const { MARK, DIV, row } = require("../utils/ui");
 
 module.exports = {
   name: "ping",
@@ -13,14 +13,14 @@ module.exports = {
     const latency = event.timestamp ? Date.now() - event.timestamp : null;
     const latencyText = latency !== null ? `${latency}ms` : "—";
 
-    const status = latency === null        ? "—"
-      : latency < 300 ? "🟢 ممتاز"
-      : latency < 700 ? "🟡 جيد"
-                      : "🔴 بطيء";
+    const status = latency === null   ? "—"
+      : latency < 300 ? "ممتاز"
+      : latency < 700 ? "جيد"
+                      : "بطيء";
 
     const msg = [
-      `🏓  بونج!`,
-      ``,
+      `${MARK} بونج`,
+      DIV,
       row("الاستجابة", latencyText),
       row("الحالة   ", status),
     ].join("\n");
