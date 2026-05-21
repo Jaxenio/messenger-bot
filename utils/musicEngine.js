@@ -235,6 +235,15 @@ async function downloadYouTube(url, outPath) {
     "18",   // combined 360p mp4 fallback — audio is always present
   ];
 
+  // Player clients that bypass YouTube bot-detection (no sign-in required).
+  // tv_embedded and mediaconnect are most reliable; web_creator as last resort.
+  const PLAYER_CLIENTS = [
+    "tv_embedded",
+    "mediaconnect",
+    "web_creator",
+    "ios",
+  ];
+
   const YTDLP_BASE = [
     "--no-playlist",
     "--no-part", "--no-cache-dir",
@@ -243,31 +252,39 @@ async function downloadYouTube(url, outPath) {
     "--socket-timeout", "30",
   ];
 
-  // Try each format chain until we have a raw file on disk
+  // Try each format chain × each player client until we get a file on disk
   let rawFile = null;
   let lastErr  = null;
   const RAW_EXTS = ["m4a", "webm", "mp4", "opus", "ogg", "aac"];
 
+  outer:
   for (const fmt of FORMAT_CHAINS) {
-    // Remove any leftover temp files from a previous attempt
-    for (const ext of RAW_EXTS) { try { fs.unlinkSync(`${base}.${ext}`); } catch {} }
+    for (const client of PLAYER_CLIENTS) {
+      // Remove any leftover temp files from a previous attempt
+      for (const ext of RAW_EXTS) { try { fs.unlinkSync(`${base}.${ext}`); } catch {} }
 
-    logger.info("MusicEngine", `yt-dlp fmt="${fmt}": ${url.slice(-15)}`);
-    try {
-      await withTimeout(
-        _spawnAsync(bin, [...YTDLP_BASE, "-f", fmt, "-o", `${base}.%(ext)s`, url],
-          { timeout: DOWNLOAD_TIMEOUT }),
-        DOWNLOAD_TIMEOUT + 5_000, `تحميل (${fmt})`
-      );
-      for (const ext of RAW_EXTS) {
-        const fp = `${base}.${ext}`;
-        if (fs.existsSync(fp) && fs.statSync(fp).size > 10_240) { rawFile = fp; break; }
+      logger.info("MusicEngine", `yt-dlp client="${client}" fmt="${fmt}": ${url.slice(-15)}`);
+      try {
+        await withTimeout(
+          _spawnAsync(bin, [
+            ...YTDLP_BASE,
+            "--extractor-args", `youtube:player_client=${client}`,
+            "-f", fmt,
+            "-o", `${base}.%(ext)s`,
+            url,
+          ], { timeout: DOWNLOAD_TIMEOUT }),
+          DOWNLOAD_TIMEOUT + 5_000, `تحميل (${client}/${fmt})`
+        );
+        for (const ext of RAW_EXTS) {
+          const fp = `${base}.${ext}`;
+          if (fs.existsSync(fp) && fs.statSync(fp).size > 10_240) { rawFile = fp; break; }
+        }
+        if (rawFile) break outer;
+        throw new Error("output file missing or empty after download");
+      } catch (e) {
+        lastErr = e;
+        logger.warn("MusicEngine", `client="${client}" fmt="${fmt}" failed: ${e.message.slice(0, 120)}`);
       }
-      if (rawFile) break;
-      throw new Error("output file missing or empty after download");
-    } catch (e) {
-      lastErr = e;
-      logger.warn("MusicEngine", `fmt="${fmt}" failed: ${e.message.slice(0, 120)}`);
     }
   }
 
