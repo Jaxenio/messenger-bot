@@ -1,12 +1,13 @@
 "use strict";
 
 const config = require("../config.json");
+const { ok, err, row } = require("../utils/ui");
 
 module.exports = {
   name: "kick",
   aliases: ["remove", "rm"],
-  description: "Remove a member from the group. (Admin only)",
-  usage: "kick @mention [reason]",
+  description: "طرد عضو من المجموعة.",
+  usage: "kick @عضو [السبب]",
   category: "Group",
   groupOnly: true,
   adminOnly: true,
@@ -15,9 +16,9 @@ module.exports = {
     const mentions   = event.mentions || {};
     const mentionIDs = Object.keys(mentions);
 
-    if (mentionIDs.length === 0) {
+    if (!mentionIDs.length) {
       return api.sendMessage(
-        "❌ Please mention who to kick.\nUsage: " + config.prefix + "kick @user [reason]",
+        err(`اذكر العضو المراد طرده.\nالاستخدام: ${config.prefix}kick @عضو [السبب]`),
         event.threadID
       );
     }
@@ -26,34 +27,33 @@ module.exports = {
     const targetID = mentionIDs[0];
 
     if (targetID === botID) {
-      return api.sendMessage("❌ I can't kick myself.", event.threadID);
+      return api.sendMessage(err("لا يمكنني طرد نفسي."), event.threadID);
     }
 
-    // Check if target is a group admin — guarded so a failed getThreadInfo
-    // doesn't prevent the kick attempt entirely.
     let adminIDs = [];
     try {
       const threadInfo = await api.getThreadInfo(event.threadID);
       adminIDs = (threadInfo.adminIDs || []).map(a => a.id || a);
-    } catch {
-      // Cannot determine admin status — proceed anyway (best-effort)
-    }
+    } catch {}
 
     if (adminIDs.includes(targetID)) {
-      return api.sendMessage("❌ Cannot kick a group admin.", event.threadID);
+      return api.sendMessage(err("لا يمكن طرد مشرف المجموعة."), event.threadID);
     }
 
-    const reason = args.slice(mentionIDs.length).join(" ") || "No reason provided.";
+    const name   = Object.values(mentions)[0]?.replace(/@/, "") || targetID;
+    const reason = args.slice(mentionIDs.length).join(" ").trim() || "مخالفة قوانين المجموعة";
 
     try {
       const result = await api.gcmember("remove", targetID, event.threadID);
-      if (result && result.type === "error_gc") {
-        return api.sendMessage("❌ Failed: " + result.error, event.threadID);
+      if (result?.type === "error_gc") {
+        return api.sendMessage(err("فشل الطرد: " + result.error), event.threadID);
       }
-      const name = Object.values(mentions)[0]?.replace(/@/, "") || targetID;
-      api.sendMessage("✅ " + name + " has been removed.\n📝 Reason: " + reason, event.threadID);
+      api.sendMessage(
+        [ok("تم طرد العضو"), ``, row("العضو ", name), row("السبب", reason)].join("\n"),
+        event.threadID
+      );
     } catch (e) {
-      api.sendMessage("❌ Error: " + e.message, event.threadID);
+      api.sendMessage(err("فشل الطرد: " + e.message), event.threadID);
     }
   },
 };
