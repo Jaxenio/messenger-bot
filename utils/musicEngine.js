@@ -1,14 +1,13 @@
 "use strict";
 
 /**
- * musicEngine v3 — uses play-dl (pure Node.js) + ffmpeg.
- * No external binaries required beyond ffmpeg (available in Nix env).
+ * musicEngine v4
  *
- * Provider chain:
- *   1. YouTube       via play-dl search  → play-dl stream → ffmpeg → mp3
- *   2. YouTube Music via internal API    → play-dl stream → ffmpeg → mp3 (fallback)
+ * Search:   play-dl (YouTube)  +  YouTube Music internal API (fallback)
+ * Download: yt-dlp binary  →  mp3  (play.stream was broken — Invalid URL)
  *
- * Both providers deliver full-length tracks through the same download pipeline.
+ * yt-dlp is auto-downloaded once to TMP_DIR if not found on the system.
+ * Retries 4 YouTube player clients: android → ios → tv_embedded → mweb
  */
 
 const fs    = require("fs");
@@ -102,6 +101,93 @@ function _msToTimestamp(ms) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+// ── yt-dlp helpers ────────────────────────────────────────────────────────────
+const YTDLP_CACHED = path.join(TMP_DIR, "yt-dlp");
+let _ytdlpPath = null;
+
+const YT_CLIENTS = ["android", "ios", "tv_embedded", "mweb"];
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function _spawnAsync(cmd, args, { timeout = 60_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const proc  = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const out   = [];
+    const err   = [];
+    proc.stdout.on("data", d => out.push(d));
+    proc.stderr.on("data", d => err.push(d));
+    proc.on("error", e => { if (!done) { done = true; reject(e); } });
+    proc.on("close", code => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      const stderr = Buffer.concat(err).toString();
+      if (code === 0) return resolve(Buffer.concat(out).toString() + stderr);
+      reject(new Error(`${path.basename(cmd)} exit ${code}: ${stderr.slice(0, 300)}`));
+    });
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try { proc.kill("SIGKILL"); } catch {}
+      reject(new Error(`${path.basename(cmd)} timeout (${Math.round(timeout / 1000)}s)`));
+    }, timeout);
+  });
+}
+
+async function _httpFetchBinary(url) {
+  return new Promise((resolve, reject) => {
+    const mod = url.startsWith("https") ? https : require("http");
+    const req = mod.get(url, { timeout: 90_000, headers: { "User-Agent": "curl/7.88" } }, res => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        req.destroy();
+        return _httpFetchBinary(res.headers.location).then(resolve, reject);
+      }
+      if (res.statusCode !== 200) { req.destroy(); return reject(new Error("HTTP " + res.statusCode)); }
+      const chunks = [];
+      res.on("data", c => chunks.push(c));
+      res.on("end", () => resolve(Buffer.concat(chunks)));
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("fetch timeout")); });
+  });
+}
+
+async function _ensureYtDlp() {
+  if (_ytdlpPath) return _ytdlpPath;
+
+  const HOME = process.env.HOME || "/root";
+  const candidates = [
+    YTDLP_CACHED,
+    "/usr/local/bin/yt-dlp",
+    "/usr/bin/yt-dlp",
+    path.join(HOME, ".local/bin/yt-dlp"),
+    "/nix/var/nix/profiles/default/bin/yt-dlp",
+    path.join(HOME, ".nix-profile/bin/yt-dlp"),
+  ];
+
+  for (const c of candidates) {
+    try {
+      const ver = await _spawnAsync(c, ["--version"], { timeout: 5_000 });
+      logger.info("MusicEngine", `yt-dlp found: ${c} (${ver.trim()})`);
+      _ytdlpPath = c;
+      return c;
+    } catch {}
+  }
+
+  // Download from GitHub releases
+  logger.info("MusicEngine", "Downloading yt-dlp binary...");
+  const buf = await withTimeout(_httpFetchBinary(
+    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"
+  ), 90_000, "yt-dlp download");
+  fs.writeFileSync(YTDLP_CACHED, buf, { mode: 0o755 });
+  const ver = await _spawnAsync(YTDLP_CACHED, ["--version"], { timeout: 5_000 });
+  logger.success("MusicEngine", `yt-dlp ready: ${ver.trim()}`);
+  _ytdlpPath = YTDLP_CACHED;
+  return YTDLP_CACHED;
+}
+
 // ── Provider 1: YouTube via play-dl ──────────────────────────────────────────
 async function searchYouTube(query) {
   const results = await withTimeout(
@@ -125,57 +211,50 @@ async function searchYouTube(query) {
   };
 }
 
-// Shared download function used by both YouTube and YouTube Music providers.
+// Shared download — uses yt-dlp with 4 player-client retries → mp3
 async function downloadYouTube(url, outPath) {
+  const bin    = await withTimeout(_ensureYtDlp(), 95_000, "تجهيز yt-dlp");
   const ffmpeg = _findFfmpeg();
-  logger.info("MusicEngine", `Streaming → ffmpeg → ${path.basename(outPath)}`);
 
-  const audioInfo = await withTimeout(play.stream(url, { quality: 2 }), 30_000, "play-dl stream");
+  // yt-dlp writes to <template>.mp3 after extraction.
+  // We strip the .mp3 from the template so it doesn't double-extend.
+  const base = outPath.endsWith(".mp3") ? outPath.slice(0, -4) : outPath;
 
-  return new Promise((resolve, reject) => {
-    const args = [
-      "-i", "pipe:0",
-      "-vn",
-      "-ar", "44100",
-      "-ac", "2",
-      "-b:a", "128k",
-      "-f", "mp3",
-      "-y",
-      outPath,
-    ];
+  const BASE_ARGS = [
+    "--no-playlist",
+    "-x", "--audio-format", "mp3", "--audio-quality", "128k",
+    "--ffmpeg-location", ffmpeg,
+    "--no-part", "--no-cache-dir",
+    "--quiet", "--no-warnings",
+    "--force-ipv4", "--geo-bypass", "--no-check-certificates",
+    "--socket-timeout", "30",
+    "-o", base,          // yt-dlp appends .mp3 → base.mp3 === outPath
+  ];
 
-    const ff = spawn(ffmpeg, args, { stdio: ["pipe", "ignore", "pipe"] });
-    const errs = [];
-    ff.stderr.on("data", d => errs.push(d));
+  let lastError = null;
+  for (let i = 0; i < YT_CLIENTS.length; i++) {
+    const client = YT_CLIENTS[i];
+    try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); } catch {}
 
-    audioInfo.stream.pipe(ff.stdin);
-    audioInfo.stream.on("error", err => { try { ff.kill(); } catch {} reject(err); });
-    ff.stdin.on("error", () => {});
-
-    let settled = false;
-    const done = (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (err) return reject(err);
+    logger.info("MusicEngine", `yt-dlp client=${client}: ${url.slice(-15)}`);
+    try {
+      await withTimeout(
+        _spawnAsync(bin, [...BASE_ARGS, "--extractor-args", `youtube:player_client=${client}`, url],
+          { timeout: DOWNLOAD_TIMEOUT }),
+        DOWNLOAD_TIMEOUT + 5_000, `تحميل (${client})`
+      );
       if (fs.existsSync(outPath) && fs.statSync(outPath).size > 1024) {
-        resolve();
-      } else {
-        reject(new Error("ffmpeg produced an empty file"));
+        logger.success("MusicEngine", `OK client=${client}: ${path.basename(outPath)}`);
+        return;
       }
-    };
-
-    ff.on("close", code => {
-      if (code === 0) return done(null);
-      done(new Error("ffmpeg exit " + code + ": " + Buffer.concat(errs).toString().slice(-300)));
-    });
-    ff.on("error", done);
-
-    const timer = setTimeout(() => {
-      try { ff.kill("SIGKILL"); } catch {}
-      done(new Error("انتهت مهلة التحميل (120s)"));
-    }, DOWNLOAD_TIMEOUT);
-  });
+      throw new Error("الملف مفقود أو فارغ بعد التحميل");
+    } catch (e) {
+      lastError = e;
+      logger.warn("MusicEngine", `client=${client} failed: ${e.message.slice(0, 100)}`);
+      if (i < YT_CLIENTS.length - 1) await sleep(Math.min(500 * (2 ** i), 3000));
+    }
+  }
+  throw new Error(lastError?.message || "yt-dlp: كل العملاء فشلوا");
 }
 
 // ── Provider 2: YouTube Music via internal API ────────────────────────────────
