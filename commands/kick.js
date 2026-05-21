@@ -1,7 +1,7 @@
 "use strict";
 
 const config = require("../config.json");
-const { ok, err, row } = require("../utils/ui");
+const { DIV, MARK, row, ok, err } = require("../utils/ui");
 
 module.exports = {
   name: "kick",
@@ -18,7 +18,7 @@ module.exports = {
 
     if (!mentionIDs.length) {
       return api.sendMessage(
-        err(`اذكر العضو المراد طرده.\nالاستخدام: ${config.prefix}kick @عضو [السبب]`),
+        err(`اذكر العضو.\nالاستخدام: ${config.prefix}kick @عضو [السبب]`),
         event.threadID
       );
     }
@@ -26,9 +26,7 @@ module.exports = {
     const botID    = api.getCurrentUserID();
     const targetID = mentionIDs[0];
 
-    if (targetID === botID) {
-      return api.sendMessage(err("لا يمكنني طرد نفسي."), event.threadID);
-    }
+    if (targetID === botID) return api.sendMessage(err("لا يمكنني طرد نفسي."), event.threadID);
 
     let adminIDs = [];
     try {
@@ -49,7 +47,7 @@ module.exports = {
         return api.sendMessage(err("فشل الطرد: " + result.error), event.threadID);
       }
       api.sendMessage(
-        [ok("تم طرد العضو"), ``, row("العضو ", name), row("السبب", reason)].join("\n"),
+        [`${MARK} تم الطرد`, DIV, row("العضو", name), row("السبب", reason)].join("\n"),
         event.threadID
       );
     } catch (e) {
