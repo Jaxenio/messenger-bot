@@ -1,7 +1,7 @@
 "use strict";
 
 const config = require("../config.json");
-const { LINE2, err } = require("../utils/ui");
+const { DIV, MARK, err } = require("../utils/ui");
 
 module.exports = {
   name: "announce",
@@ -16,7 +16,7 @@ module.exports = {
     const text = args.join(" ").trim();
     if (!text) {
       return api.sendMessage(
-        err(`اكتب نص الإعلان. الاستخدام: ${config.prefix}announce <النص>`),
+        err(`اكتب نص الإعلان.\nالاستخدام: ${config.prefix}announce <النص>`),
         event.threadID
       );
     }
@@ -27,16 +27,9 @@ module.exports = {
       senderName = info[event.senderID]?.name || event.senderID;
     } catch {}
 
-    const msg = [
-      `📢  إعلان رسمي`,
-      LINE2,
-      ``,
-      text,
-      ``,
-      LINE2,
-      `من: ${senderName}`,
-    ].join("\n");
-
-    api.sendMessage(msg, event.threadID);
+    api.sendMessage(
+      [`${MARK} إعلان`, DIV, ``, text, ``, DIV, `من: ${senderName}`].join("\n"),
+      event.threadID
+    );
   },
 };
