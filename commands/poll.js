@@ -1,12 +1,13 @@
 "use strict";
 
 const config = require("../config.json");
+const { ok, err, row } = require("../utils/ui");
 
 module.exports = {
   name: "poll",
   aliases: ["vote"],
-  description: "Create a poll in the group. (Admin only)",
-  usage: "poll <question> | option1 | option2 | ...",
+  description: "إنشاء تصويت في المجموعة.",
+  usage: "poll <السؤال> | خيار1 | خيار2 | ...",
   category: "Group",
   groupOnly: true,
   adminOnly: true,
@@ -17,8 +18,13 @@ module.exports = {
 
     if (parts.length < 3) {
       return api.sendMessage(
-        "❌ Usage: " + config.prefix + "poll <question> | option1 | option2 | ...\n" +
-        "Example: " + config.prefix + "poll Best color? | Red | Blue | Green",
+        [
+          err("الاستخدام الصحيح:"),
+          `  ${config.prefix}poll <السؤال> | خيار1 | خيار2 | ...`,
+          ``,
+          `مثال:`,
+          `  ${config.prefix}poll اللون الأفضل؟ | أحمر | أزرق | أخضر`,
+        ].join("\n"),
         event.threadID
       );
     }
@@ -27,7 +33,7 @@ module.exports = {
 
     if (typeof api.createPoll !== "function") {
       return api.sendMessage(
-        "❌ The poll feature is not supported by the current API version.",
+        err("التصويت غير مدعوم في هذه النسخة من الواجهة."),
         event.threadID
       );
     }
@@ -35,11 +41,16 @@ module.exports = {
     try {
       await api.createPoll(question, event.threadID, options);
       api.sendMessage(
-        "📊 Poll \"" + question + "\" created with " + options.length + " options!",
+        [
+          ok("تم إنشاء التصويت"),
+          ``,
+          row("السؤال  ", question),
+          row("الخيارات", `${options.length} خيارات`),
+        ].join("\n"),
         event.threadID
       );
     } catch (e) {
-      api.sendMessage("❌ Error creating poll: " + e.message, event.threadID);
+      api.sendMessage(err("فشل إنشاء التصويت: " + e.message), event.threadID);
     }
   },
 };
