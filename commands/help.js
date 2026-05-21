@@ -1,7 +1,7 @@
 "use strict";
 
 const config = require("../config.json");
-const { LINE, LINE2 } = require("../utils/ui");
+const { DIV, MARK } = require("../utils/ui");
 
 const CAT_AR = {
   General:       "عام",
@@ -11,16 +11,6 @@ const CAT_AR = {
   Fun:           "مرح",
   Entertainment: "ترفيه",
   Admin:         "الإدارة",
-};
-
-const CAT_ICON = {
-  General:       "◈",
-  Info:          "◈",
-  Utility:       "◉",
-  Group:         "◎",
-  Fun:           "◉",
-  Entertainment: "♫",
-  Admin:         "◆",
 };
 
 const ORDER = ["General", "Info", "Utility", "Group", "Fun", "Entertainment", "Admin"];
@@ -43,39 +33,42 @@ module.exports = {
 
       if (!cmd) {
         return api.sendMessage(
-          `❌  الأمر «${name}» غير موجود.\nاكتب ${prefix}help لعرض قائمة الأوامر.`,
+          `✗  الأمر «${name}» غير موجود.\n${prefix}help لعرض قائمة الأوامر.`,
           event.threadID
         );
       }
 
       const catAr = CAT_AR[cmd.category] || cmd.category || "عام";
+      const usageText = Array.isArray(cmd.usage)
+        ? cmd.usage.join("\n  ")
+        : (cmd.usage || cmd.name);
+
       const lines = [
-        `${LINE}`,
-        `📖  تفاصيل الأمر`,
-        `${LINE}`,
+        `${MARK} ${prefix}${cmd.name}`,
+        DIV,
         ``,
-        `الأمر       ›  ${prefix}${cmd.name}`,
-        `الوصف       ›  ${cmd.description}`,
-        `الفئة       ›  ${catAr}`,
-        `الاستخدام   ›  ${prefix}${Array.isArray(cmd.usage) ? cmd.usage[0] : (cmd.usage || cmd.name)}`,
+        `الوصف       ·  ${cmd.description}`,
+        `الفئة       ·  ${catAr}`,
+        `الاستخدام   ·  ${prefix}${usageText}`,
       ];
 
       if (cmd.aliases?.length) {
-        lines.push(`الاختصارات  ›  ${cmd.aliases.map(a => prefix + a).join("  ·  ")}`);
+        lines.push(`الاختصارات  ·  ${cmd.aliases.map(a => prefix + a).join("  ")}`);
       }
 
       const flags = [];
-      if (cmd.adminOnly) flags.push("🔒 للمشرفين فقط");
-      if (cmd.groupOnly) flags.push("👥 للمجموعات فقط");
+      if (cmd.adminOnly) flags.push("للمشرفين فقط");
+      if (cmd.groupOnly) flags.push("للمجموعات فقط");
       if (flags.length) {
         lines.push(``);
-        lines.push(...flags);
+        lines.push(DIV);
+        lines.push(flags.join("  ·  "));
       }
 
       return api.sendMessage(lines.join("\n"), event.threadID);
     }
 
-    // ── قائمة كل الأوامر ──────────────────────────────────────────────────
+    // ── قائمة الأوامر ──────────────────────────────────────────────────────
     const unique     = [...new Set(commands.values())];
     const categories = {};
 
@@ -94,18 +87,16 @@ module.exports = {
       ...Object.keys(categories).filter(c => !ORDER.includes(c)),
     ];
 
-    const total = unique.length;
-    let msg = `${LINE}\n🤖  ${config.bot.name}  ·  v${config.bot.version}\n${LINE}\n\n`;
-    msg += `البادئة: ${prefix}  |  الأوامر: ${total}\n\n`;
+    let msg = `${MARK} ${config.bot.name}  v${config.bot.version}\n${DIV}\n`;
+    msg    += `البادئة · ${prefix}  |  الأوامر · ${unique.length}\n`;
 
     for (const cat of sorted) {
-      const icon = CAT_ICON[cat] || "▸";
       const name = CAT_AR[cat] || cat;
-      const cmds = categories[cat].map(n => `${prefix}${n}`).join("  ·  ");
-      msg += `${icon}  ${name}\n  ${cmds}\n\n`;
+      const cmds = categories[cat].map(n => `${prefix}${n}`).join("  ");
+      msg += `\n${name}\n  ${MARK} ${cmds}\n`;
     }
 
-    msg += `${LINE2}\naكتب ${prefix}help <أمر> للتفاصيل`;
+    msg += `\n${DIV}\n${prefix}help <أمر> للتفاصيل`;
 
     api.sendMessage(msg, event.threadID);
   },
