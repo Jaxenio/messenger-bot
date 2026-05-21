@@ -45,18 +45,25 @@ module.exports = {
     }
 
     // ترتيب الفئات
-    const ORDER = ["General", "Info", "Utility", "Group", "Fun"];
+    const ORDER = ["General", "Info", "Utility", "Group", "Fun", "Entertainment", "Admin"];
     const sorted = [
       ...ORDER.filter(c => categories[c]),
       ...Object.keys(categories).filter(c => !ORDER.includes(c)),
     ];
 
+    // ترتيب أبجدي داخل كل فئة
+    for (const cat of Object.keys(categories)) {
+      categories[cat].sort((a, b) => a.localeCompare(b));
+    }
+
     const ICONS = {
-      General  : "🔹",
-      Info     : "🔹",
-      Utility  : "🔧",
-      Group    : "🔸",
-      Fun      : "🎮",
+      General      : "🔹",
+      Info         : "🔹",
+      Utility      : "🔧",
+      Group        : "🔸",
+      Fun          : "🎮",
+      Entertainment: "🎵",
+      Admin        : "🛡️",
     };
 
     let msg = `┌──── 🤖 ${config.bot.name} Commands ────\n│\n`;
