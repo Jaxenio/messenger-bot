@@ -1,9 +1,11 @@
 "use strict";
 
+const { LINE, LINE2, err, row } = require("../utils/ui");
+
 module.exports = {
   name: "members",
   aliases: ["list", "ml"],
-  description: "List all members in this group chat.",
+  description: "عرض قائمة أعضاء المجموعة.",
   usage: "members",
   category: "Group",
   groupOnly: true,
@@ -13,16 +15,15 @@ module.exports = {
     try {
       info = await api.getThreadInfo(event.threadID);
     } catch (e) {
-      return api.sendMessage("❌ Could not retrieve group info: " + e.message, event.threadID);
+      return api.sendMessage(err("تعذّر جلب معلومات المجموعة: " + e.message), event.threadID);
     }
-    if (!info) return api.sendMessage("❌ Could not retrieve group info.", event.threadID);
+    if (!info) return api.sendMessage(err("تعذّر جلب معلومات المجموعة."), event.threadID);
 
     const adminIDs = (info.adminIDs || []).map(a => a.id || a);
     const ids      = info.participantIDs || [];
 
-    // Batch getUserInfo in chunks of 50 to avoid API limits
     let userInfo = {};
-    const CHUNK = 50;
+    const CHUNK  = 50;
     for (let i = 0; i < ids.length; i += CHUNK) {
       try {
         const chunk = await api.getUserInfo(ids.slice(i, i + CHUNK));
@@ -31,15 +32,21 @@ module.exports = {
     }
 
     const lines = ids.map((id, i) => {
-      const name    = userInfo[id]?.name || "User " + id;
-      const isAdmin = adminIDs.includes(id) ? " 👑" : "";
-      return (i + 1) + ". " + name + isAdmin;
+      const name    = userInfo[id]?.name || id;
+      const isAdmin = adminIDs.includes(id) ? "  👑" : "";
+      return `  ${i + 1}.  ${name}${isAdmin}`;
     });
 
-    const header =
-      "👥 Group: " + (info.name || "Unnamed") + "\n" +
-      "📊 Members: " + ids.length + "\n" +
-      "─────────────────";
+    const header = [
+      LINE,
+      `👥  أعضاء المجموعة`,
+      LINE,
+      ``,
+      row("الاسم ", info.name || "غير مسمّاة"),
+      row("العدد ", `${ids.length} عضو`),
+      ``,
+      LINE2,
+    ].join("\n");
 
     const MAX = 3800;
     const fullMsg = header + "\n" + lines.join("\n");
@@ -48,7 +55,6 @@ module.exports = {
       return api.sendMessage(fullMsg, event.threadID);
     }
 
-    // Chunk into multiple messages
     const chunks = [];
     let buf = header;
     for (const line of lines) {
@@ -62,8 +68,10 @@ module.exports = {
     if (buf) chunks.push(buf);
 
     for (let i = 0; i < chunks.length; i++) {
-      await api.sendMessage("[" + (i + 1) + "/" + chunks.length + "]\n" + chunks[i], event.threadID)
-        .catch(() => {});
+      await api.sendMessage(
+        `[${i + 1}/${chunks.length}]\n${chunks[i]}`,
+        event.threadID
+      ).catch(() => {});
       if (i < chunks.length - 1) await new Promise(r => setTimeout(r, 500));
     }
   },
