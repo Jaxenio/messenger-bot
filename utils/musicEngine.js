@@ -216,33 +216,60 @@ async function searchYouTube(query) {
   };
 }
 
-// Shared download — yt-dlp (web client, no PO-token needed) → raw audio → ffmpeg → mp3
-//
-// Two-step: Step 1 downloads the best audio stream (m4a/webm) via yt-dlp WITHOUT
-// invoking ffmpeg (no -x flag), so yt-dlp doesn't need ffprobe.  Step 2 converts
-// the raw file to mp3 using the system ffmpeg.  Falls back to the combined mp4
-// stream (format 18) if audio-only tracks fail.
-async function downloadYouTube(url, outPath) {
+// ── Primary downloader: play-dl stream → ffmpeg pipe → mp3 ───────────────────
+// Uses play-dl's own YouTube access (no yt-dlp, no bot-detection wall).
+async function _downloadWithPlayDl(url, outPath) {
+  const ffmpeg = _findFfmpeg();
+
+  const source = await withTimeout(
+    play.stream(url),
+    SEARCH_TIMEOUT + 5_000,
+    "play-dl stream"
+  );
+
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const proc = spawn(ffmpeg, [
+      "-i", "pipe:0",
+      "-vn", "-ar", "44100", "-ac", "2", "-b:a", "128k",
+      "-f", "mp3", "-y", outPath,
+    ], { stdio: ["pipe", "ignore", "pipe"] });
+
+    const errChunks = [];
+    proc.stderr.on("data", d => errChunks.push(d));
+    proc.on("error", e => { if (!done) { done = true; reject(e); } });
+    proc.on("close", code => {
+      if (done) return;
+      done = true;
+      if (code === 0 && fs.existsSync(outPath) && fs.statSync(outPath).size > 1024) {
+        resolve();
+      } else {
+        const msg = Buffer.concat(errChunks).toString().slice(0, 200);
+        reject(new Error(`ffmpeg exit ${code}: ${msg}`));
+      }
+    });
+
+    source.stream.pipe(proc.stdin);
+    source.stream.on("error", e => {
+      if (!done) { done = true; try { proc.kill(); } catch {} reject(e); }
+    });
+  });
+}
+
+// ── Fallback downloader: yt-dlp with bot-bypass player clients ────────────────
+async function _downloadWithYtDlp(url, outPath) {
   const bin    = await withTimeout(_ensureYtDlp(), 95_000, "تجهيز yt-dlp");
   const ffmpeg = _findFfmpeg();
 
-  // Base without extension — yt-dlp will append .m4a / .webm etc.
   const base = outPath.endsWith(".mp3") ? outPath.slice(0, -4) : outPath;
 
-  // Format priority: high-quality m4a → webm → any audio-only → combined mp4
   const FORMAT_CHAINS = [
     "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
-    "18",   // combined 360p mp4 fallback — audio is always present
+    "18",
   ];
 
-  // Player clients that bypass YouTube bot-detection (no sign-in required).
-  // tv_embedded and mediaconnect are most reliable; web_creator as last resort.
-  const PLAYER_CLIENTS = [
-    "tv_embedded",
-    "mediaconnect",
-    "web_creator",
-    "ios",
-  ];
+  // Clients that don't require sign-in
+  const PLAYER_CLIENTS = ["tv_embedded", "mediaconnect", "web_creator", "ios"];
 
   const YTDLP_BASE = [
     "--no-playlist",
@@ -252,7 +279,6 @@ async function downloadYouTube(url, outPath) {
     "--socket-timeout", "30",
   ];
 
-  // Try each format chain × each player client until we get a file on disk
   let rawFile = null;
   let lastErr  = null;
   const RAW_EXTS = ["m4a", "webm", "mp4", "opus", "ogg", "aac"];
@@ -260,9 +286,7 @@ async function downloadYouTube(url, outPath) {
   outer:
   for (const fmt of FORMAT_CHAINS) {
     for (const client of PLAYER_CLIENTS) {
-      // Remove any leftover temp files from a previous attempt
       for (const ext of RAW_EXTS) { try { fs.unlinkSync(`${base}.${ext}`); } catch {} }
-
       logger.info("MusicEngine", `yt-dlp client="${client}" fmt="${fmt}": ${url.slice(-15)}`);
       try {
         await withTimeout(
@@ -289,6 +313,42 @@ async function downloadYouTube(url, outPath) {
   }
 
   if (!rawFile) throw new Error(lastErr?.message || "yt-dlp: تعذّر إيجاد stream صالح");
+
+  logger.info("MusicEngine", `ffmpeg: ${path.extname(rawFile)} → mp3`);
+  try {
+    await withTimeout(
+      _spawnAsync(ffmpeg,
+        ["-i", rawFile, "-vn", "-ar", "44100", "-ac", "2", "-b:a", "128k", "-f", "mp3", "-y", outPath],
+        { timeout: 60_000 }),
+      65_000, "ffmpeg convert"
+    );
+  } finally {
+    try { fs.unlinkSync(rawFile); } catch {}
+  }
+
+  if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1024) {
+    throw new Error("ffmpeg produced empty or missing mp3");
+  }
+}
+
+// ── Public download: play-dl first, yt-dlp as fallback ───────────────────────
+async function downloadYouTube(url, outPath) {
+  // Step 1 — play-dl stream (bypasses bot-detection entirely)
+  try {
+    logger.info("MusicEngine", `play-dl stream: ${url.slice(-15)}`);
+    await withTimeout(_downloadWithPlayDl(url, outPath), DOWNLOAD_TIMEOUT, "play-dl download");
+    if (fs.existsSync(outPath) && fs.statSync(outPath).size > 1024) {
+      logger.success("MusicEngine", `play-dl OK: ${path.basename(outPath)}`);
+      return;
+    }
+  } catch (e) {
+    logger.warn("MusicEngine", `play-dl failed, falling back to yt-dlp: ${e.message.slice(0, 120)}`);
+    try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); } catch {}
+  }
+
+  // Step 2 — yt-dlp fallback with player-client rotation
+  logger.info("MusicEngine", `yt-dlp fallback: ${url.slice(-15)}`);
+  await _downloadWithYtDlp(url, outPath);
 
   // Step 2: convert raw audio to mp3 with ffmpeg
   logger.info("MusicEngine",
