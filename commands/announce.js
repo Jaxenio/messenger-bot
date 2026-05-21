@@ -1,12 +1,13 @@
 "use strict";
 
 const config = require("../config.json");
+const { LINE2, err } = require("../utils/ui");
 
 module.exports = {
   name: "announce",
   aliases: ["ann", "broadcast"],
-  description: "Send a bold announcement message. (Admin only)",
-  usage: "announce <message>",
+  description: "إرسال إعلان رسمي للمجموعة.",
+  usage: "announce <النص>",
   category: "Group",
   groupOnly: true,
   adminOnly: true,
@@ -14,19 +15,27 @@ module.exports = {
   async execute({ api, event, args }) {
     const text = args.join(" ").trim();
     if (!text) {
-      return api.sendMessage(`❌ Provide a message.\nUsage: ${config.prefix}announce <message>`, event.threadID);
+      return api.sendMessage(
+        err(`اكتب نص الإعلان. الاستخدام: ${config.prefix}announce <النص>`),
+        event.threadID
+      );
     }
 
     let senderName = event.senderID;
     try {
       const info = await api.getUserInfo([event.senderID]);
       senderName = info[event.senderID]?.name || event.senderID;
-    } catch (_) {}
+    } catch {}
 
-    const msg =
-      `📢 ══ ANNOUNCEMENT ══ 📢\n\n` +
-      `${text}\n\n` +
-      `── From: ${senderName} ──`;
+    const msg = [
+      `📢  إعلان رسمي`,
+      LINE2,
+      ``,
+      text,
+      ``,
+      LINE2,
+      `من: ${senderName}`,
+    ].join("\n");
 
     api.sendMessage(msg, event.threadID);
   },
