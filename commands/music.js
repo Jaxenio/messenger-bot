@@ -1,104 +1,131 @@
 "use strict";
 
 const fs     = require("fs");
+const path   = require("path");
 const engine = require("../utils/musicEngine");
 
 module.exports = {
-  name: "music",
-  aliases: ["song", "اغنية", "أغنية", "mp3"],
-  description: "البحث عن أغنية وإرسالها (YouTube أو iTunes كاحتياط).",
-  usage: "music [اسم الأغنية أو الفنان]",
-  category: "Entertainment",
+  name:        "music",
+  aliases:     ["song", "اغنية", "أغنية", "mp3"],
+  description: "البحث عن أغنية وإرسالها كملف صوتي (YouTube أو YouTube Music كاحتياط).",
+  usage:       "music [اسم الأغنية أو الفنان]",
+  category:    "Entertainment",
 
   async execute({ api, event, args }) {
     const { threadID, senderID } = event;
     const query = args.join(" ").trim();
 
-    // ── مساعد التشخيص (للمطور فقط) ─────────────────────────────────────────
-    if (query === "diag") {
-      const d = engine.diagnostics();
-      return api.sendMessage(
-        "🔧 تشخيص محرك الموسيقى:\n" +
-        "• yt-dlp   : " + d.ytdlpPath + "\n" +
-        "• محدَّث   : " + (d.autoUpdated ? "نعم" : "لا") + "\n" +
-        "• يعمل الآن: " + d.concurrent + "\n" +
-        "• ينتظر   : " + d.queued + "\n" +
-        "• ملفات مؤقتة: " + d.tmpFiles,
-        threadID
-      );
-    }
-
-    // ── تحقق من الطلب ───────────────────────────────────────────────────────
     if (!query) {
       return api.sendMessage(
         "🎵 الاستخدام: -music [اسم الأغنية]\n" +
         "أمثلة:\n" +
-        "  -music GMFU\n" +
+        "  -music Blinding Lights\n" +
         "  -music محمد عبده\n" +
-        "  -music Blinding Lights The Weeknd",
+        "  -music GMFU",
         threadID
       );
     }
 
-    // ── cooldown ─────────────────────────────────────────────────────────────
-    const remaining = engine.userCooldown(senderID);
-    if (remaining > 0) {
-      return api.sendMessage("⏳ انتظر " + remaining + " ثانية قبل طلب أغنية أخرى.", threadID);
+    // ── Cooldown ──────────────────────────────────────────────────────────────
+    const wait = engine.userCooldown(senderID);
+    if (wait > 0) {
+      return api.sendMessage(`⏳ انتظر ${wait} ثانية قبل طلب أغنية أخرى.`, threadID);
     }
     engine.markUser(senderID);
 
-    // ── بحث ─────────────────────────────────────────────────────────────────
-    await api.sendMessage("🔍 جاري البحث عن: " + query + " ...", threadID).catch(() => {});
+    await api.sendMessage(`🔍 جاري البحث عن: ${query}...`, threadID).catch(() => {});
 
+    // ── Step 1: Search (YouTube → YouTube Music fallback) ─────────────────────
     let track;
+    let provider = "youtube";
+
     try {
-      track = await engine.search(query);
-    } catch (e) {
-      return api.sendMessage("😕 " + e.message, threadID).catch(() => {});
+      track = await engine.searchYouTube(query);
+    } catch {
+      try {
+        track    = await engine.searchYouTubeMusic(query);
+        provider = "ytmusic";
+      } catch {
+        return api.sendMessage(`😕 لم أجد نتائج لـ: ${query}`, threadID).catch(() => {});
+      }
     }
 
-    // ── إبلاغ المستخدم ───────────────────────────────────────────────────────
-    const sourceLabel = track.provider === "itunes"
-      ? "\n📦 المصدر: iTunes (معاينة 30 ثانية)"
-      : "\n📦 المصدر: YouTube";
+    // ── Step 2: Notify & download ─────────────────────────────────────────────
+    const outPath = path.join(
+      engine.TMP_DIR,
+      `music_${Date.now()}_${Math.random().toString(36).slice(2)}.mp3`
+    );
+
+    const sourceLabel = provider === "ytmusic" ? "📦 YouTube Music" : "📦 YouTube";
+
     await api.sendMessage(
-      "🎵 " + track.title +
-      (track.artist   ? "\n🎤 " + track.artist   : "") +
-      (track.duration ? "\n⏱ "  + track.duration : "") +
-      sourceLabel +
+      `🎵 ${track.title}` +
+      (track.artist   ? `\n🎤 ${track.artist}`   : "") +
+      (track.duration ? `\n⏱ ${track.duration}` : "") +
+      `\n${sourceLabel}` +
       "\n⬇️ جاري التحميل...",
       threadID
     ).catch(() => {});
 
-    // ── تحميل ───────────────────────────────────────────────────────────────
-    let audioPath;
     try {
-      audioPath = await engine.download(track);
-    } catch (e) {
-      return api.sendMessage("❌ فشل التحميل:\n" + e.message.slice(0, 300), threadID).catch(() => {});
+      await engine.downloadYouTube(track.url, outPath);
+    } catch (dlErr) {
+      // Primary download failed — if we used YouTube, retry with YouTube Music
+      if (provider === "youtube") {
+        try {
+          const ytmTrack = await engine.searchYouTubeMusic(
+            track.title + (track.artist ? " " + track.artist : "")
+          );
+          await engine.downloadYouTube(ytmTrack.url, outPath);
+          track    = ytmTrack;
+          provider = "ytmusic";
+        } catch {
+          return api.sendMessage(
+            "❌ فشل التحميل من YouTube ومن YouTube Music:\n" + dlErr.message.slice(0, 200),
+            threadID
+          ).catch(() => {});
+        }
+      } else {
+        return api.sendMessage(
+          "❌ فشل التحميل:\n" + dlErr.message.slice(0, 200),
+          threadID
+        ).catch(() => {});
+      }
     }
 
-    // ── تجميع النص النهائي بعد التحميل (قد يتغير provider إلى itunes كاحتياط) ──
-    const isPreview = !!track.preview;
-    const caption =
-      "🎵 " + track.title +
-      (track.artist   ? "\n🎤 "  + track.artist   : "") +
-      (track.duration ? "\n⏱  "  + track.duration : "") +
-      (isPreview      ? "\n⚠️ معاينة 30 ثانية (iTunes)" : "");
+    // ── Step 3: Validate & send ───────────────────────────────────────────────
+    try {
+      engine.validateFile(outPath);
+    } catch (e) {
+      engine.safeDelete(outPath, 0);
+      return api.sendMessage("❌ " + e.message, threadID).catch(() => {});
+    }
 
-    // ── إرسال ────────────────────────────────────────────────────────────────
+    const caption =
+      `🎵 ${track.title}` +
+      (track.artist   ? `\n🎤 ${track.artist}`   : "") +
+      (track.duration ? `\n⏱ ${track.duration}` : "") +
+      (provider === "ytmusic" ? "\n📦 YouTube Music" : "");
+
     try {
       await Promise.race([
-        api.sendMessage({ body: caption, attachment: fs.createReadStream(audioPath) }, threadID),
-        new Promise((_, rej) => setTimeout(() => rej(new Error("send_timeout")), 90_000)),
+        api.sendMessage(
+          { body: caption, attachment: fs.createReadStream(outPath) },
+          threadID
+        ),
+        new Promise((_, rej) =>
+          setTimeout(() => rej(new Error("send_timeout")), 90_000)
+        ),
       ]);
     } catch (e) {
-      const msg = e.message === "send_timeout"
-        ? "❌ انتهت مهلة الإرسال. جرّب أغنية أقصر."
-        : "❌ تعذّر إرسال الملف:\n" + e.message.slice(0, 200);
-      await api.sendMessage(msg, threadID).catch(() => {});
+      await api.sendMessage(
+        e.message === "send_timeout"
+          ? "❌ انتهت مهلة الإرسال، جرّب أغنية أقصر."
+          : "❌ تعذّر إرسال الملف: " + e.message.slice(0, 150),
+        threadID
+      ).catch(() => {});
     } finally {
-      engine.safeDelete(audioPath);
+      engine.safeDelete(outPath);
     }
   },
 };
