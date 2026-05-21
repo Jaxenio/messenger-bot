@@ -1,13 +1,15 @@
 "use strict";
 
 /**
- * musicEngine v4
+ * musicEngine v5
  *
- * Search:   play-dl (YouTube)  +  YouTube Music internal API (fallback)
- * Download: yt-dlp binary  →  mp3  (play.stream was broken — Invalid URL)
+ * Download strategy (tries each in order until one succeeds):
+ *   1. @distube/ytdl-core  — Node.js YouTube client, handles bot-detection natively
+ *   2. play-dl stream      — alternative YouTube stream path
+ *   3. yt-dlp              — binary, tries tv_embedded / mediaconnect / web_creator clients
+ *   4. SoundCloud          — completely different source, no bot-detection
  *
- * yt-dlp is auto-downloaded once to TMP_DIR if not found on the system.
- * Retries 4 YouTube player clients: android → ios → tv_embedded → mweb
+ * Each step logs clearly so failures are visible in bot logs.
  */
 
 const fs    = require("fs");
@@ -49,7 +51,6 @@ function _findFfmpeg() {
   if (process.env.FFMPEG_PATH && fs.existsSync(process.env.FFMPEG_PATH)) {
     return process.env.FFMPEG_PATH;
   }
-  // `which` resolves the current nix store path dynamically
   try {
     const { execSync } = require("child_process");
     const p = execSync("which ffmpeg", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
@@ -65,7 +66,7 @@ function _findFfmpeg() {
   for (const p of candidates) {
     try { if (fs.statSync(p).isFile()) return p; } catch {}
   }
-  // ffmpeg-static: bundled binary shipped with npm package (no system install needed)
+  // ffmpeg-static: bundled binary from npm (no system install needed)
   try {
     const staticPath = require("ffmpeg-static");
     if (staticPath && fs.existsSync(staticPath)) return staticPath;
@@ -93,7 +94,6 @@ function withTimeout(promise, ms, label) {
   ]);
 }
 
-// Recursively find all values for a given key anywhere in a nested object.
 function _findInTree(obj, key, out = []) {
   if (!obj || typeof obj !== "object") return out;
   if (key in obj) out.push(obj[key]);
@@ -101,7 +101,6 @@ function _findInTree(obj, key, out = []) {
   return out;
 }
 
-// Format milliseconds → "m:ss"
 function _msToTimestamp(ms) {
   if (!ms || isNaN(ms)) return "";
   const total = Math.round(ms / 1000);
@@ -110,13 +109,41 @@ function _msToTimestamp(ms) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+// ── Pipe readable stream through ffmpeg → mp3 file ───────────────────────────
+function _pipeToMp3(readable, outPath) {
+  const ffmpeg = _findFfmpeg();
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const proc = spawn(ffmpeg, [
+      "-i", "pipe:0",
+      "-vn", "-ar", "44100", "-ac", "2", "-b:a", "128k",
+      "-f", "mp3", "-y", outPath,
+    ], { stdio: ["pipe", "ignore", "pipe"] });
+
+    const errChunks = [];
+    proc.stderr.on("data", d => errChunks.push(d));
+    proc.on("error", e => { if (!done) { done = true; reject(e); } });
+    proc.on("close", code => {
+      if (done) return;
+      done = true;
+      if (code === 0 && fs.existsSync(outPath) && fs.statSync(outPath).size > 1024) {
+        resolve();
+      } else {
+        const msg = Buffer.concat(errChunks).toString().slice(0, 300);
+        reject(new Error(`ffmpeg exit ${code}: ${msg}`));
+      }
+    });
+
+    readable.pipe(proc.stdin);
+    readable.on("error", e => {
+      if (!done) { done = true; try { proc.kill(); } catch {} reject(e); }
+    });
+  });
+}
+
 // ── yt-dlp helpers ────────────────────────────────────────────────────────────
 const YTDLP_CACHED = path.join(TMP_DIR, "yt-dlp");
 let _ytdlpPath = null;
-
-const YT_CLIENTS = ["android", "ios", "tv_embedded", "mweb"];
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function _spawnAsync(cmd, args, { timeout = 60_000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -165,7 +192,6 @@ async function _httpFetchBinary(url) {
 
 async function _ensureYtDlp() {
   if (_ytdlpPath) return _ytdlpPath;
-
   const HOME = process.env.HOME || "/root";
   const candidates = [
     YTDLP_CACHED,
@@ -175,7 +201,6 @@ async function _ensureYtDlp() {
     "/nix/var/nix/profiles/default/bin/yt-dlp",
     path.join(HOME, ".nix-profile/bin/yt-dlp"),
   ];
-
   for (const c of candidates) {
     try {
       const ver = await _spawnAsync(c, ["--version"], { timeout: 5_000 });
@@ -184,12 +209,11 @@ async function _ensureYtDlp() {
       return c;
     } catch {}
   }
-
-  // Download from GitHub releases
   logger.info("MusicEngine", "Downloading yt-dlp binary...");
-  const buf = await withTimeout(_httpFetchBinary(
-    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"
-  ), 90_000, "yt-dlp download");
+  const buf = await withTimeout(
+    _httpFetchBinary("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"),
+    90_000, "yt-dlp download"
+  );
   fs.writeFileSync(YTDLP_CACHED, buf, { mode: 0o755 });
   const ver = await _spawnAsync(YTDLP_CACHED, ["--version"], { timeout: 5_000 });
   logger.success("MusicEngine", `yt-dlp ready: ${ver.trim()}`);
@@ -197,7 +221,7 @@ async function _ensureYtDlp() {
   return YTDLP_CACHED;
 }
 
-// ── Provider 1: YouTube via play-dl ──────────────────────────────────────────
+// ── Search: YouTube via play-dl ───────────────────────────────────────────────
 async function searchYouTube(query) {
   const results = await withTimeout(
     play.search(query, { source: { youtube: "video" }, limit: 8 }),
@@ -216,171 +240,13 @@ async function searchYouTube(query) {
     artist:    v.channel?.name || "",
     duration:  v.durationRaw || "",
     seconds:   v.durationInSec,
-    isPreview: false,
   };
 }
 
-// ── Primary downloader: play-dl stream → ffmpeg pipe → mp3 ───────────────────
-// Uses play-dl's own YouTube access (no yt-dlp, no bot-detection wall).
-async function _downloadWithPlayDl(url, outPath) {
-  const ffmpeg = _findFfmpeg();
-
-  const source = await withTimeout(
-    play.stream(url),
-    SEARCH_TIMEOUT + 5_000,
-    "play-dl stream"
-  );
-
-  return new Promise((resolve, reject) => {
-    let done = false;
-    const proc = spawn(ffmpeg, [
-      "-i", "pipe:0",
-      "-vn", "-ar", "44100", "-ac", "2", "-b:a", "128k",
-      "-f", "mp3", "-y", outPath,
-    ], { stdio: ["pipe", "ignore", "pipe"] });
-
-    const errChunks = [];
-    proc.stderr.on("data", d => errChunks.push(d));
-    proc.on("error", e => { if (!done) { done = true; reject(e); } });
-    proc.on("close", code => {
-      if (done) return;
-      done = true;
-      if (code === 0 && fs.existsSync(outPath) && fs.statSync(outPath).size > 1024) {
-        resolve();
-      } else {
-        const msg = Buffer.concat(errChunks).toString().slice(0, 200);
-        reject(new Error(`ffmpeg exit ${code}: ${msg}`));
-      }
-    });
-
-    source.stream.pipe(proc.stdin);
-    source.stream.on("error", e => {
-      if (!done) { done = true; try { proc.kill(); } catch {} reject(e); }
-    });
-  });
-}
-
-// ── Fallback downloader: yt-dlp with bot-bypass player clients ────────────────
-async function _downloadWithYtDlp(url, outPath) {
-  const bin    = await withTimeout(_ensureYtDlp(), 95_000, "تجهيز yt-dlp");
-  const ffmpeg = _findFfmpeg();
-
-  const base = outPath.endsWith(".mp3") ? outPath.slice(0, -4) : outPath;
-
-  const FORMAT_CHAINS = [
-    "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
-    "18",
-  ];
-
-  // Clients that don't require sign-in
-  const PLAYER_CLIENTS = ["tv_embedded", "mediaconnect", "web_creator", "ios"];
-
-  const YTDLP_BASE = [
-    "--no-playlist",
-    "--no-part", "--no-cache-dir",
-    "--quiet", "--no-warnings",
-    "--force-ipv4", "--geo-bypass", "--no-check-certificates",
-    "--socket-timeout", "30",
-  ];
-
-  let rawFile = null;
-  let lastErr  = null;
-  const RAW_EXTS = ["m4a", "webm", "mp4", "opus", "ogg", "aac"];
-
-  outer:
-  for (const fmt of FORMAT_CHAINS) {
-    for (const client of PLAYER_CLIENTS) {
-      for (const ext of RAW_EXTS) { try { fs.unlinkSync(`${base}.${ext}`); } catch {} }
-      logger.info("MusicEngine", `yt-dlp client="${client}" fmt="${fmt}": ${url.slice(-15)}`);
-      try {
-        await withTimeout(
-          _spawnAsync(bin, [
-            ...YTDLP_BASE,
-            "--extractor-args", `youtube:player_client=${client}`,
-            "-f", fmt,
-            "-o", `${base}.%(ext)s`,
-            url,
-          ], { timeout: DOWNLOAD_TIMEOUT }),
-          DOWNLOAD_TIMEOUT + 5_000, `تحميل (${client}/${fmt})`
-        );
-        for (const ext of RAW_EXTS) {
-          const fp = `${base}.${ext}`;
-          if (fs.existsSync(fp) && fs.statSync(fp).size > 10_240) { rawFile = fp; break; }
-        }
-        if (rawFile) break outer;
-        throw new Error("output file missing or empty after download");
-      } catch (e) {
-        lastErr = e;
-        logger.warn("MusicEngine", `client="${client}" fmt="${fmt}" failed: ${e.message.slice(0, 120)}`);
-      }
-    }
-  }
-
-  if (!rawFile) throw new Error(lastErr?.message || "yt-dlp: تعذّر إيجاد stream صالح");
-
-  logger.info("MusicEngine", `ffmpeg: ${path.extname(rawFile)} → mp3`);
-  try {
-    await withTimeout(
-      _spawnAsync(ffmpeg,
-        ["-i", rawFile, "-vn", "-ar", "44100", "-ac", "2", "-b:a", "128k", "-f", "mp3", "-y", outPath],
-        { timeout: 60_000 }),
-      65_000, "ffmpeg convert"
-    );
-  } finally {
-    try { fs.unlinkSync(rawFile); } catch {}
-  }
-
-  if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1024) {
-    throw new Error("ffmpeg produced empty or missing mp3");
-  }
-}
-
-// ── Public download: play-dl first, yt-dlp as fallback ───────────────────────
-async function downloadYouTube(url, outPath) {
-  // Step 1 — play-dl stream (bypasses bot-detection entirely)
-  try {
-    logger.info("MusicEngine", `play-dl stream: ${url.slice(-15)}`);
-    await withTimeout(_downloadWithPlayDl(url, outPath), DOWNLOAD_TIMEOUT, "play-dl download");
-    if (fs.existsSync(outPath) && fs.statSync(outPath).size > 1024) {
-      logger.success("MusicEngine", `play-dl OK: ${path.basename(outPath)}`);
-      return;
-    }
-  } catch (e) {
-    logger.warn("MusicEngine", `play-dl failed, falling back to yt-dlp: ${e.message.slice(0, 120)}`);
-    try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); } catch {}
-  }
-
-  // Step 2 — yt-dlp fallback with player-client rotation
-  logger.info("MusicEngine", `yt-dlp fallback: ${url.slice(-15)}`);
-  await _downloadWithYtDlp(url, outPath);
-
-  // Step 2: convert raw audio to mp3 with ffmpeg
-  logger.info("MusicEngine",
-    `ffmpeg: ${path.extname(rawFile)} → mp3  [${path.basename(rawFile)}]`);
-  try {
-    await withTimeout(
-      _spawnAsync(ffmpeg,
-        ["-i", rawFile, "-vn", "-ar", "44100", "-ac", "2", "-b:a", "128k", "-f", "mp3", "-y", outPath],
-        { timeout: 60_000 }),
-      65_000, "ffmpeg convert"
-    );
-  } finally {
-    try { fs.unlinkSync(rawFile); } catch {}
-  }
-
-  if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1024) {
-    throw new Error("ffmpeg produced empty or missing mp3");
-  }
-  logger.success("MusicEngine",
-    `Ready: ${path.basename(outPath)} (${Math.round(fs.statSync(outPath).size / 1024)}KB)`);
-}
-
-// ── Provider 2: YouTube Music via internal API ────────────────────────────────
+// ── Search: YouTube Music internal API ────────────────────────────────────────
 const YTM_ENDPOINT =
   "https://music.youtube.com/youtubei/v1/search" +
   "?key=AIzaSyC9XL3ZjWddXya6X74dJoCTL-FUBU6QkLc&prettyPrint=false";
-
-// Songs-only filter param for the YouTube Music search API.
 const YTM_SONGS_PARAM = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D";
 
 function _ytMusicPost(query) {
@@ -389,14 +255,9 @@ function _ytMusicPost(query) {
       query,
       params: YTM_SONGS_PARAM,
       context: {
-        client: {
-          clientName:    "WEB_REMIX",
-          clientVersion: "1.20240101.01.00",
-          hl:            "en",
-        },
+        client: { clientName: "WEB_REMIX", clientVersion: "1.20240101.01.00", hl: "en" },
       },
     }));
-
     const options = new URL(YTM_ENDPOINT);
     const req = https.request(
       {
@@ -423,7 +284,7 @@ function _ytMusicPost(query) {
         res.on("error", reject);
       }
     );
-    req.on("error",   reject);
+    req.on("error", reject);
     req.on("timeout", () => { req.destroy(); reject(new Error("YTMusic API timeout")); });
     req.write(body);
     req.end();
@@ -433,31 +294,22 @@ function _ytMusicPost(query) {
 function _parseYTMusicItems(data) {
   const items = _findInTree(data, "musicResponsiveListItemRenderer");
   const songs = [];
-
   for (const item of items) {
     try {
       const videoIds = _findInTree(item, "videoId").filter(id => id?.length === 11);
       if (!videoIds.length) continue;
-
-      const fc     = item.flexColumns || [];
-      const title  = fc[0]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs?.[0]?.text || "";
+      const fc    = item.flexColumns || [];
+      const title = fc[0]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs?.[0]?.text || "";
       if (!title) continue;
-
-      // Artist is often in fc[1] runs[0], sometimes after a separator run
       const artistRuns = fc[1]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs || [];
       const artist = artistRuns.find(r => r.text && r.text.trim() && r.text !== " • " && r.text !== "•")?.text || "";
-
-      // Duration: try fixedColumns first, then lengthMs
       let duration = "";
-      const fixedText = item.fixedColumns?.[0]
-        ?.musicResponsiveListItemFixedColumnRenderer?.text?.runs?.[0]?.text;
-      if (fixedText) {
-        duration = fixedText;
-      } else {
+      const fixedText = item.fixedColumns?.[0]?.musicResponsiveListItemFixedColumnRenderer?.text?.runs?.[0]?.text;
+      if (fixedText) { duration = fixedText; }
+      else {
         const ms = _findInTree(item, "lengthMs")[0];
         if (ms) duration = _msToTimestamp(Number(ms));
       }
-
       songs.push({ videoId: videoIds[0], title, artist, duration });
     } catch {}
   }
@@ -470,14 +322,177 @@ async function searchYouTubeMusic(query) {
   if (!songs.length) throw new Error("no_results");
   const s = songs[0];
   return {
-    provider:  "ytmusic",
-    url:       `https://www.youtube.com/watch?v=${s.videoId}`,
-    title:     s.title  || query,
-    artist:    s.artist || "",
-    duration:  s.duration || "",
-    seconds:   0,
-    isPreview: false,
+    provider: "ytmusic",
+    url:      `https://www.youtube.com/watch?v=${s.videoId}`,
+    title:    s.title  || query,
+    artist:   s.artist || "",
+    duration: s.duration || "",
+    seconds:  0,
   };
+}
+
+// ── Download method 1: @distube/ytdl-core ────────────────────────────────────
+async function _dlYtdlCore(url, outPath) {
+  const ytdl = require("@distube/ytdl-core");
+  const agent = ytdl.createAgent();
+  const stream = ytdl(url, {
+    filter:  "audioonly",
+    quality: "highestaudio",
+    agent,
+    requestOptions: {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+    },
+  });
+  await withTimeout(_pipeToMp3(stream, outPath), DOWNLOAD_TIMEOUT, "ytdl-core download");
+}
+
+// ── Download method 2: play-dl stream ────────────────────────────────────────
+async function _dlPlayDl(url, outPath) {
+  const source = await withTimeout(
+    play.stream(url),
+    SEARCH_TIMEOUT + 5_000,
+    "play-dl stream"
+  );
+  await withTimeout(_pipeToMp3(source.stream, outPath), DOWNLOAD_TIMEOUT, "play-dl pipe");
+}
+
+// ── Download method 3: yt-dlp with bot-bypass clients ────────────────────────
+async function _dlYtDlp(url, outPath) {
+  const bin    = await withTimeout(_ensureYtDlp(), 95_000, "تجهيز yt-dlp");
+  const ffmpeg = _findFfmpeg();
+  const base   = outPath.endsWith(".mp3") ? outPath.slice(0, -4) : outPath;
+
+  const FORMAT_CHAINS   = ["bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio", "18"];
+  const PLAYER_CLIENTS  = ["tv_embedded", "mediaconnect", "web_creator", "ios"];
+  const RAW_EXTS        = ["m4a", "webm", "mp4", "opus", "ogg", "aac"];
+  const YTDLP_BASE      = [
+    "--no-playlist", "--no-part", "--no-cache-dir",
+    "--quiet", "--no-warnings",
+    "--force-ipv4", "--geo-bypass", "--no-check-certificates",
+    "--socket-timeout", "30",
+  ];
+
+  let rawFile = null;
+  let lastErr  = null;
+
+  outer:
+  for (const fmt of FORMAT_CHAINS) {
+    for (const client of PLAYER_CLIENTS) {
+      for (const ext of RAW_EXTS) { try { fs.unlinkSync(`${base}.${ext}`); } catch {} }
+      logger.info("MusicEngine", `yt-dlp client="${client}" fmt="${fmt}"`);
+      try {
+        await withTimeout(
+          _spawnAsync(bin, [
+            ...YTDLP_BASE,
+            "--extractor-args", `youtube:player_client=${client}`,
+            "-f", fmt, "-o", `${base}.%(ext)s`, url,
+          ], { timeout: DOWNLOAD_TIMEOUT }),
+          DOWNLOAD_TIMEOUT + 5_000, `yt-dlp (${client}/${fmt})`
+        );
+        for (const ext of RAW_EXTS) {
+          const fp = `${base}.${ext}`;
+          if (fs.existsSync(fp) && fs.statSync(fp).size > 10_240) { rawFile = fp; break; }
+        }
+        if (rawFile) break outer;
+        throw new Error("output missing after download");
+      } catch (e) {
+        lastErr = e;
+        logger.warn("MusicEngine", `yt-dlp client="${client}" failed: ${e.message.slice(0, 100)}`);
+      }
+    }
+  }
+
+  if (!rawFile) throw new Error(lastErr?.message || "yt-dlp: no valid stream found");
+
+  logger.info("MusicEngine", `ffmpeg convert: ${path.extname(rawFile)} → mp3`);
+  try {
+    await withTimeout(
+      _spawnAsync(ffmpeg,
+        ["-i", rawFile, "-vn", "-ar", "44100", "-ac", "2", "-b:a", "128k", "-f", "mp3", "-y", outPath],
+        { timeout: 60_000 }),
+      65_000, "ffmpeg convert"
+    );
+  } finally {
+    try { fs.unlinkSync(rawFile); } catch {}
+  }
+
+  if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1024) {
+    throw new Error("ffmpeg produced empty mp3");
+  }
+}
+
+// ── Download method 4: SoundCloud (completely different source) ───────────────
+async function _dlSoundCloud(query, outPath) {
+  const results = await withTimeout(
+    play.search(query, { source: { soundcloud: "tracks" }, limit: 5 }),
+    SEARCH_TIMEOUT,
+    "SoundCloud search"
+  );
+  if (!results || !results.length) throw new Error("SoundCloud: no results for: " + query);
+
+  const track  = results[0];
+  const source = await withTimeout(
+    play.stream(track.url),
+    SEARCH_TIMEOUT + 5_000,
+    "SoundCloud stream"
+  );
+
+  await withTimeout(_pipeToMp3(source.stream, outPath), DOWNLOAD_TIMEOUT, "SoundCloud pipe");
+
+  return {
+    title:    track.name || query,
+    artist:   track.user?.name || "",
+    duration: track.durationInMs ? _msToTimestamp(track.durationInMs) : "",
+    provider: "soundcloud",
+  };
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/**
+ * downloadYouTube(url, outPath)
+ * Tries ytdl-core → play-dl → yt-dlp.
+ * Throws if all three fail.
+ * Returns the method that succeeded (for logging).
+ */
+async function downloadYouTube(url, outPath) {
+  const methods = [
+    { name: "ytdl-core", fn: () => _dlYtdlCore(url, outPath) },
+    { name: "play-dl",   fn: () => _dlPlayDl(url, outPath)   },
+    { name: "yt-dlp",    fn: () => _dlYtDlp(url, outPath)    },
+  ];
+
+  const errors = [];
+  for (const { name, fn } of methods) {
+    try {
+      logger.info("MusicEngine", `Trying ${name}: ${url.slice(-15)}`);
+      await fn();
+      if (fs.existsSync(outPath) && fs.statSync(outPath).size > 1024) {
+        logger.success("MusicEngine", `${name} succeeded: ${path.basename(outPath)}`);
+        return name;
+      }
+      throw new Error("output file empty after download");
+    } catch (e) {
+      logger.warn("MusicEngine", `${name} failed: ${e.message.slice(0, 150)}`);
+      errors.push(`[${name}] ${e.message.slice(0, 120)}`);
+      try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); } catch {}
+    }
+  }
+
+  throw new Error(errors.join(" | "));
+}
+
+/**
+ * downloadSoundCloud(query, outPath)
+ * Searches SoundCloud and downloads. Returns track info.
+ * Used as last-resort fallback when all YouTube methods fail.
+ */
+async function downloadSoundCloud(query, outPath) {
+  logger.info("MusicEngine", `SoundCloud fallback: "${query}"`);
+  return _dlSoundCloud(query, outPath);
 }
 
 // ── File validation ───────────────────────────────────────────────────────────
@@ -503,6 +518,7 @@ module.exports = {
   searchYouTube,
   searchYouTubeMusic,
   downloadYouTube,
+  downloadSoundCloud,
   validateFile,
   safeDelete,
   userCooldown,
