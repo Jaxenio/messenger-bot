@@ -50,6 +50,12 @@ health.start({
   onCritical: async (type, report) => {
     logger.error("Bot", "Health critical event: " + type, report);
     await diagnostics.createSnapshot("health_" + type);
+    // Trigger a clean restart when memory is critical to prevent OOM crash.
+    // PM2 / Railway will restart the process automatically.
+    if (type === "memory_critical") {
+      logger.error("Bot", "Memory critical — restarting process in 15s...");
+      setTimeout(() => process.exit(1), 15_000);
+    }
   },
 });
 
@@ -106,13 +112,20 @@ function fmt(template, vars) {
 }
 
 // ── Message deduplication (prevents replaying the same event twice) ───────────
-const _seenMsgIDs = new Set();
+// Map (msgID → timestamp) avoids creating thousands of individual setTimeout
+// timers over a full day of messages; a single interval does batch eviction.
+const _seenMsgIDs = new Map();
+setInterval(() => {
+  const cutoff = Date.now() - 90_000;
+  for (const [id, ts] of _seenMsgIDs) {
+    if (ts < cutoff) _seenMsgIDs.delete(id);
+  }
+}, 2 * 60_000).unref();
+
 function _isDuplicate(msgID) {
   if (!msgID) return false;
   if (_seenMsgIDs.has(msgID)) return true;
-  _seenMsgIDs.add(msgID);
-  // Auto-evict after 60 s to prevent unbounded growth
-  setTimeout(() => _seenMsgIDs.delete(msgID), 60_000).unref();
+  _seenMsgIDs.set(msgID, Date.now());
   return false;
 }
 
@@ -406,6 +419,19 @@ function startBot() {
     threadScanner.setApi(api);
     setBotStatus("online");
     nicknameLocks.setApi(api);
+    health.setLoginOk(true);
+    health.setMqttOk(true);
+
+    // Restore any scheduled messages that were active before the last restart
+    const scheduleCmd = commands.get("schedule");
+    if (scheduleCmd && typeof scheduleCmd._restoreSchedules === "function") {
+      try {
+        scheduleCmd._restoreSchedules(api);
+        logger.info("Bot", "Scheduled messages restored.");
+      } catch (e) {
+        logger.warn("Bot", "Failed to restore schedules: " + e.message);
+      }
+    }
 
     if (config.humanSimulator && config.humanSimulator.enabled) {
       humanSimulator.start(api, config.humanSimulator);
@@ -414,6 +440,7 @@ function startBot() {
 
     api.onReLoginSuccess = async () => {
       logger.success("Bot", "Auto re-login succeeded.");
+      health.setLoginOk(true);
       try {
         const fresh = api.getAppState();
         if (Array.isArray(fresh) && fresh.length > 0) await session.saveAndPush(fresh);
@@ -443,6 +470,7 @@ function startBot() {
         _mqttErrorCount++;
         logger.warn("MQTT", "Listen error #" + _mqttErrorCount + ": " + (mqttErr.message || mqttErr));
         diagnostics.recordError("MQTT", mqttErr instanceof Error ? mqttErr : new Error(String(mqttErr)));
+        if (_mqttErrorCount >= 3) health.setMqttOk(false);
         if (_mqttErrorCount >= 5) {
           logger.error("MQTT", "5 consecutive errors — forcing reconnect.");
           if (_mqttWatchdog) { clearInterval(_mqttWatchdog); _mqttWatchdog = null; }
@@ -454,6 +482,7 @@ function startBot() {
         return;
       }
       _mqttErrorCount = 0;
+      health.setMqttOk(true);
       if (!event) return;
       _lastEventAt = Date.now();
       try {
