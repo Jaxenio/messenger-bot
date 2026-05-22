@@ -21,7 +21,7 @@
     "greetNewMembers": false,
     "farewellMembers": false,
     "antiSpam": true,
-    "antiSpamCooldownMs": 3000,
+    "antiSpamCooldownMs": 5000,
     "logMessages": true
   },
   "humanSimulator": {
@@ -56,8 +56,8 @@
     "autoReconnect": true,
     "simulateTyping": true,
     "forceLogin": false,
-    "maxConcurrentRequests": 5,
-    "maxRequestsPerMinute": 40,
+    "maxConcurrentRequests": 3,
+    "maxRequestsPerMinute": 20,
     "requestCooldownMs": 60000
   }
 }
