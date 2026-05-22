@@ -333,16 +333,28 @@ async function searchYouTubeMusic(query) {
 
 // ── Download method 1: @distube/ytdl-core ────────────────────────────────────
 async function _dlYtdlCore(url, outPath) {
-  const ytdl = require("@distube/ytdl-core");
-  const agent = ytdl.createAgent();
+  const ytdl  = require("@distube/ytdl-core");
+  // createAgent with an empty cookie jar still sets up proper undici pooling;
+  // the full browser-like headers below are what actually reduce bot flags.
+  const agent = ytdl.createAgent([], { pipelining: 1 });
   const stream = ytdl(url, {
     filter:  "audioonly",
     quality: "highestaudio",
     agent,
     requestOptions: {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
+        // Impersonate a real Chrome browser on Windows — matches what YouTube sees
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept":          "*/*",
+        "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        // Coming from YouTube Music specifically matters for bot scoring
+        "Origin":          "https://music.youtube.com",
+        "Referer":         "https://music.youtube.com/",
+        "Sec-Fetch-Dest":  "empty",
+        "Sec-Fetch-Mode":  "cors",
+        "Sec-Fetch-Site":  "same-site",
+        "Connection":      "keep-alive",
       },
     },
   });
@@ -351,27 +363,61 @@ async function _dlYtdlCore(url, outPath) {
 
 // ── Download method 2: play-dl stream ────────────────────────────────────────
 async function _dlPlayDl(url, outPath) {
-  const source = await withTimeout(
-    play.stream(url),
-    SEARCH_TIMEOUT + 5_000,
-    "play-dl stream"
-  );
+  // Try quality 0 (highest) first, then fall back to quality 2 (lowest latency)
+  let source;
+  try {
+    source = await withTimeout(play.stream(url, { quality: 0 }), SEARCH_TIMEOUT + 5_000, "play-dl stream q0");
+  } catch {
+    source = await withTimeout(play.stream(url, { quality: 2 }), SEARCH_TIMEOUT + 5_000, "play-dl stream q2");
+  }
   await withTimeout(_pipeToMp3(source.stream, outPath), DOWNLOAD_TIMEOUT, "play-dl pipe");
 }
 
 // ── Download method 3: yt-dlp with bot-bypass clients ────────────────────────
+//
+// Root cause of "Sign in to confirm you're not a bot":
+//   YouTube's web player now requires a PO token tied to the visitor session.
+//   The fix is to use the ANDROID_MUSIC / ANDROID_VR Innertube clients, which
+//   call the API directly and do NOT require a PO token or JS player execution.
+//
+// Key flag:  --extractor-args "youtube:player_client=android_music;player_skip=configs,js"
+//   player_client=android_music  → use Android YouTube Music API (no bot check)
+//   player_skip=configs,js       → skip fetching the web player JS (where the
+//                                  bot detection triggers); android clients don't
+//                                  need it since they use the Innertube API directly.
+//
 async function _dlYtDlp(url, outPath) {
   const bin    = await withTimeout(_ensureYtDlp(), 95_000, "تجهيز yt-dlp");
   const ffmpeg = _findFfmpeg();
   const base   = outPath.endsWith(".mp3") ? outPath.slice(0, -4) : outPath;
 
-  const FORMAT_CHAINS   = ["bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio", "18"];
-  const PLAYER_CLIENTS  = ["tv_embedded", "mediaconnect", "web_creator", "ios"];
-  const RAW_EXTS        = ["m4a", "webm", "mp4", "opus", "ogg", "aac"];
-  const YTDLP_BASE      = [
+  // Ordered by effectiveness against bot detection (2025):
+  //   android_music / android_vr → Innertube, no PO token needed → most reliable
+  //   ios                        → Innertube, no PO token needed
+  //   android                    → fallback
+  //   web_embedded               → embedded player, lighter bot scoring
+  //   tv_embedded                → TV client, also lighter
+  const CLIENTS = [
+    // [clientName, playerSkip]
+    // android* and ios use Innertube directly — skip JS player entirely
+    ["android_music", "configs,js"],
+    ["android_vr",    "configs,js"],
+    ["ios",           "configs,js"],
+    ["android",       "configs,js"],
+    // web clients: still need configs but we can skip js
+    ["web_embedded",  "js"],
+    ["tv_embedded",   "js"],
+  ];
+
+  // android clients produce .m4a/.webm; ios also does; web can do more formats
+  const FORMAT_CHAINS = ["bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio", "18"];
+  const RAW_EXTS      = ["m4a", "webm", "opus", "aac", "mp4", "ogg"];
+
+  const YTDLP_BASE = [
     "--no-playlist", "--no-part", "--no-cache-dir",
     "--quiet", "--no-warnings",
-    "--force-ipv4", "--geo-bypass", "--no-check-certificates",
+    "--force-ipv4", "--geo-bypass",
+    "--no-check-certificates",
     "--socket-timeout", "30",
   ];
 
@@ -379,16 +425,21 @@ async function _dlYtDlp(url, outPath) {
   let lastErr  = null;
 
   outer:
-  for (const fmt of FORMAT_CHAINS) {
-    for (const client of PLAYER_CLIENTS) {
+  for (const [client, skip] of CLIENTS) {
+    for (const fmt of FORMAT_CHAINS) {
+      // Clean up any partial output from a previous attempt
       for (const ext of RAW_EXTS) { try { fs.unlinkSync(`${base}.${ext}`); } catch {} }
+
       logger.info("MusicEngine", `yt-dlp client="${client}" fmt="${fmt}"`);
       try {
         await withTimeout(
           _spawnAsync(bin, [
             ...YTDLP_BASE,
-            "--extractor-args", `youtube:player_client=${client}`,
-            "-f", fmt, "-o", `${base}.%(ext)s`, url,
+            // THE KEY FIX — android/ios clients + skip JS player = no bot check
+            "--extractor-args", `youtube:player_client=${client};player_skip=${skip}`,
+            "-f", fmt,
+            "-o", `${base}.%(ext)s`,
+            url,
           ], { timeout: DOWNLOAD_TIMEOUT }),
           DOWNLOAD_TIMEOUT + 5_000, `yt-dlp (${client}/${fmt})`
         );
@@ -400,12 +451,12 @@ async function _dlYtDlp(url, outPath) {
         throw new Error("output missing after download");
       } catch (e) {
         lastErr = e;
-        logger.warn("MusicEngine", `yt-dlp client="${client}" failed: ${e.message.slice(0, 100)}`);
+        logger.warn("MusicEngine", `yt-dlp client="${client}" failed: ${e.message.slice(0, 120)}`);
       }
     }
   }
 
-  if (!rawFile) throw new Error(lastErr?.message || "yt-dlp: no valid stream found");
+  if (!rawFile) throw new Error(lastErr?.message || "yt-dlp: all clients failed");
 
   logger.info("MusicEngine", `ffmpeg convert: ${path.extname(rawFile)} → mp3`);
   try {
