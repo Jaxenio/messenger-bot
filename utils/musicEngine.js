@@ -143,7 +143,8 @@ function _pipeToMp3(readable, outPath) {
 
 // ── yt-dlp helpers ────────────────────────────────────────────────────────────
 const YTDLP_CACHED = path.join(TMP_DIR, "yt-dlp");
-let _ytdlpPath = null;
+let _ytdlpPath          = null;
+let _preferredYtdlpClient = null; // Last yt-dlp client that succeeded; tried first next time
 
 function _spawnAsync(cmd, args, { timeout = 60_000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -421,11 +422,19 @@ async function _dlYtDlp(url, outPath) {
     "--socket-timeout", "30",
   ];
 
+  // Try the last-successful client first so repeat plays skip the trial phase
+  const sortedClients = _preferredYtdlpClient
+    ? [
+        ...CLIENTS.filter(([c]) => c === _preferredYtdlpClient),
+        ...CLIENTS.filter(([c]) => c !== _preferredYtdlpClient),
+      ]
+    : CLIENTS;
+
   let rawFile = null;
   let lastErr  = null;
 
   outer:
-  for (const [client, skip] of CLIENTS) {
+  for (const [client, skip] of sortedClients) {
     for (const fmt of FORMAT_CHAINS) {
       // Clean up any partial output from a previous attempt
       for (const ext of RAW_EXTS) { try { fs.unlinkSync(`${base}.${ext}`); } catch {} }
@@ -447,7 +456,11 @@ async function _dlYtDlp(url, outPath) {
           const fp = `${base}.${ext}`;
           if (fs.existsSync(fp) && fs.statSync(fp).size > 10_240) { rawFile = fp; break; }
         }
-        if (rawFile) break outer;
+        if (rawFile) {
+          // Remember which client worked so we try it first next time
+          _preferredYtdlpClient = client;
+          break outer;
+        }
         throw new Error("output missing after download");
       } catch (e) {
         lastErr = e;
@@ -456,7 +469,10 @@ async function _dlYtDlp(url, outPath) {
     }
   }
 
-  if (!rawFile) throw new Error(lastErr?.message || "yt-dlp: all clients failed");
+  if (!rawFile) {
+    _preferredYtdlpClient = null; // All failed — reset so next call tries fresh
+    throw new Error(lastErr?.message || "yt-dlp: all clients failed");
+  }
 
   logger.info("MusicEngine", `ffmpeg convert: ${path.extname(rawFile)} → mp3`);
   try {
