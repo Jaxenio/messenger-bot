@@ -20,6 +20,7 @@ const diagnostics        = require("./utils/diagnostics");
 const { startupSelfCheck, schedule: scheduleMaintenance } = require("./utils/maintenance");
 const humanSimulator     = require("./utils/humanSimulator");
 const cookieRefresher    = require("./utils/cookieRefresher");
+const msgQueue           = require("./utils/msgQueue");
 const { login }          = require("@neoaz07/nkxfca");
 
 const { lockedThreads, mutedThreads, groupsCache, autoReplies, groupStats, replyDelay, globalLock } = require("./state");
@@ -104,6 +105,17 @@ function fmt(template, vars) {
   return template.replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? "{" + k + "}");
 }
 
+// ── Message deduplication (prevents replaying the same event twice) ───────────
+const _seenMsgIDs = new Set();
+function _isDuplicate(msgID) {
+  if (!msgID) return false;
+  if (_seenMsgIDs.has(msgID)) return true;
+  _seenMsgIDs.add(msgID);
+  // Auto-evict after 60 s to prevent unbounded growth
+  setTimeout(() => _seenMsgIDs.delete(msgID), 60_000).unref();
+  return false;
+}
+
 // ── MQTT reconnect watchdog ───────────────────────────────────────────────────
 let _lastEventAt    = Date.now();
 let _mqttErrorCount = 0;
@@ -128,8 +140,11 @@ function startMqttWatchdog(reconnectFn) {
 
 // ── Message handler ───────────────────────────────────────────────────────────
 async function handleMessage(api, event, commands) {
-  const { type, body, threadID, senderID } = event;
+  const { type, body, threadID, senderID, messageID } = event;
   if (type !== "message") return;
+
+  // Deduplication — ignore events replayed by MQTT reconnect
+  if (_isDuplicate(messageID)) return;
 
   const botID = api.getCurrentUserID();
   if (senderID === botID) return;
@@ -248,7 +263,10 @@ async function handleMessage(api, event, commands) {
   }
 
   if (replyDelay.enabled && replyDelay.ms > 0) {
-    await new Promise(r => setTimeout(r, replyDelay.ms));
+    // Random jitter ±600ms around the configured delay — human feel
+    const jitter = Math.floor(Math.random() * 600) - 300;
+    const delay  = Math.max(300, replyDelay.ms + jitter);
+    await new Promise(r => setTimeout(r, delay));
   }
 
   try {
@@ -370,6 +388,19 @@ function startBot() {
     // ── Start cookie auto-refresher (every 4 minutes) ─────────────────────
     cookieRefresher.start(api, session);
     setCookieRefresher(cookieRefresher);
+
+    // ── Wrap api.sendMessage through human-like message queue ─────────────
+    // All outgoing messages go through msgQueue: per-thread serialization,
+    // typing indicator, and random human delays — prevents ban triggers.
+    const _origSend = api.sendMessage.bind(api);
+    api.sendMessage = function queuedSend(payload, threadID, callback) {
+      const p = msgQueue.enqueue(_origSend, api, payload, threadID);
+      if (typeof callback === "function") {
+        p.then(r => callback(null, r)).catch(e => callback(e));
+      }
+      return p;
+    };
+    logger.info("MsgQueue", "Outgoing message queue active.");
 
     setBotApi(api);
     threadScanner.setApi(api);
