@@ -125,4 +125,20 @@ function enqueue(origSend, api, payload, threadID) {
   return work;
 }
 
+// ── Periodic cleanup to prevent memory growth during long runs ────────────────
+// _chains self-cleans via .finally(); _lastSent and _rateLog need manual eviction.
+setInterval(() => {
+  const now   = Date.now();
+  const STALE = 10 * 60_000; // 10 minutes idle → forget thread entry
+  for (const [tid, ts] of _lastSent) {
+    if (now - ts > STALE) _lastSent.delete(tid);
+  }
+  for (const [tid, times] of _rateLog) {
+    const fresh = times.filter(t => now - t < RATE_WINDOW);
+    if (!fresh.length) _rateLog.delete(tid);
+    else _rateLog.set(tid, fresh);
+  }
+  logger.debug("MsgQueue", `Cleanup: lastSent=${_lastSent.size} rateLog=${_rateLog.size}`);
+}, 15 * 60_000).unref();
+
 module.exports = { enqueue };
