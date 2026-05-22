@@ -3,23 +3,30 @@
 const os     = require("os");
 const logger = require("./logger");
 
-const MEM_WARN_MB     = 400;
-const MEM_CRIT_MB     = 700;
-const LOOP_WARN_MS    = 500;
-const LOOP_CRIT_MS    = 3000;
-const CHECK_INTERVAL  = 30000;
+const MEM_WARN_MB    = 400;
+const MEM_CRIT_MB    = 700;
+const LOOP_WARN_MS   = 500;
+const LOOP_CRIT_MS   = 3000;
+const CHECK_INTERVAL = 30_000;
 
 let _onCritical  = null;
 let _diagnostics = null;
 let _lastReport  = null;
 
-function _memMB()  { return Math.round(process.memoryUsage().rss / 1024 / 1024); }
+// ── Connection status flags (set by index.js) ─────────────────────────────────
+let _mqttOk  = true;
+let _loginOk = true;
+
+// ── System metrics ────────────────────────────────────────────────────────────
+function _memMB() { return Math.round(process.memoryUsage().rss / 1024 / 1024); }
+
 function _cpuPct() {
   const cpus = os.cpus();
   let idle = 0, total = 0;
   for (const c of cpus) { for (const t of Object.values(c.times)) total += t; idle += c.times.idle; }
   return total ? ((1 - idle / total) * 100) : 0;
 }
+
 function _loopLag() {
   return new Promise(resolve => {
     const t = process.hrtime.bigint();
@@ -27,15 +34,15 @@ function _loopLag() {
   });
 }
 
+// ── Health check ──────────────────────────────────────────────────────────────
 async function check() {
-  const memMB      = _memMB();
-  const cpuPct     = _cpuPct();
-  const loopLagMs  = await _loopLag();
+  const memMB     = _memMB();
+  const cpuPct    = _cpuPct();
+  const loopLagMs = await _loopLag();
 
   _lastReport = { memMB, cpuPct: +cpuPct.toFixed(1), loopLagMs: +loopLagMs.toFixed(1), ts: Date.now() };
   if (_diagnostics) _diagnostics.recordHealth(_lastReport);
 
-  // Memory
   if (memMB >= MEM_CRIT_MB) {
     logger.error("Health", `CRITICAL memory: ${memMB} MB (limit ${MEM_CRIT_MB} MB)`);
     if (_onCritical) _onCritical("memory_critical", _lastReport);
@@ -43,7 +50,6 @@ async function check() {
     logger.warn("Health", `High memory: ${memMB} MB`);
   }
 
-  // Event loop lag
   if (loopLagMs >= LOOP_CRIT_MS) {
     logger.error("Health", `CRITICAL event-loop lag: ${loopLagMs.toFixed(0)} ms`);
     if (_onCritical) _onCritical("loop_critical", _lastReport);
@@ -51,17 +57,21 @@ async function check() {
     logger.warn("Health", `High event-loop lag: ${loopLagMs.toFixed(0)} ms`);
   }
 
-  // CPU
   if (cpuPct > 90) logger.warn("Health", `High CPU: ${cpuPct.toFixed(1)}%`);
 
   logger.debug("Health", `RAM ${memMB} MB | Loop ${loopLagMs.toFixed(0)} ms | CPU ${cpuPct.toFixed(1)}%`);
   return _lastReport;
 }
 
+// ── Public API ────────────────────────────────────────────────────────────────
+
 function start({ onCritical, diagnostics } = {}) {
   _onCritical  = onCritical  || null;
   _diagnostics = diagnostics || null;
-  const t = setInterval(() => check().catch(e => logger.warn("Health", `Check failed: ${e.message}`)), CHECK_INTERVAL);
+  const t = setInterval(
+    () => check().catch(e => logger.warn("Health", `Check failed: ${e.message}`)),
+    CHECK_INTERVAL
+  );
   t.unref();
   check().catch(() => {});
   logger.info("Health", `Watchdog started — checks every ${CHECK_INTERVAL / 1000}s`);
@@ -71,4 +81,13 @@ function snapshot() {
   return _lastReport || { memMB: _memMB(), cpuPct: +_cpuPct().toFixed(1), loopLagMs: 0, ts: Date.now() };
 }
 
-module.exports = { start, snapshot, check };
+/** Called from index.js to reflect real connection state in -health command */
+function setMqttOk(ok)  { _mqttOk  = !!ok; }
+function setLoginOk(ok) { _loginOk = !!ok; }
+
+/** Used by commands/health.js — returns system metrics + connection flags */
+function getStatus() {
+  return { ...(snapshot()), mqttOk: _mqttOk, loginOk: _loginOk };
+}
+
+module.exports = { start, snapshot, check, getStatus, setMqttOk, setLoginOk };
