@@ -33,7 +33,15 @@ function logViolation({ threadID, threadName, senderID, messagePreview }) {
   if (lockViolations.length > 200) lockViolations.shift();
 }
 
-// ── Rate limiter ──────────────────────────────────────────────────────────────
+// ── SECURITY FIX: Get GitHub config from environment variables ──────────
+function _getGitHubConfig() {
+  return {
+    token: process.env.GITHUB_TOKEN || process.env.GITHUB_PERSONAL_ACCESS_TOKEN || "",
+    repo: process.env.GITHUB_REPO || "marwanbou540-gif/messenger-bot"
+  };
+}
+
+// ── Rate limiter ─────────────────────────────────────────────────────────
 const _reqMap = new Map();
 function _rateLimit(maxPerMinute = 60) {
   return (req, res, next) => {
@@ -52,7 +60,7 @@ setInterval(() => {
   for (const [ip, rec] of _reqMap) { if (now > rec.reset) _reqMap.delete(ip); }
 }, 300000).unref();
 
-// ── Auth middleware ───────────────────────────────────────────────────────────
+// ── Auth middleware ─────────────────────────────────────────────────────
 function authMiddleware(req, res, next) {
   if (req.path === "/auth/login" || req.path === "/" || req.path.startsWith("/dashboard")) return next();
   const key = config.dashboard && config.dashboard.apiKey;
@@ -62,7 +70,7 @@ function authMiddleware(req, res, next) {
   next();
 }
 
-// ── Input sanitiser ───────────────────────────────────────────────────────────
+// ── Input sanitiser ─────────────────────────────────────────────────────
 function sanitize(str, maxLen = 512) {
   if (typeof str !== "string") return "";
   return str.slice(0, maxLen).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
@@ -70,7 +78,7 @@ function sanitize(str, maxLen = 512) {
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ── SSE helpers ───────────────────────────────────────────────────────────────
+// ── SSE helpers ──────────────────────────────────────────────────────────
 const _sseClients = new Set();
 function _broadcastSSE(data) {
   const payload = `data: ${JSON.stringify(data)}\n\n`;
@@ -86,7 +94,7 @@ function logActivitySSE(msg) {
   _broadcastSSE({ type: "activity", data: entry });
 }
 
-// ── API routes ────────────────────────────────────────────────────────────────
+// ── API routes ──────────────────────────────────────────────────────────
 function createApiServer() {
   const app = express();
 
@@ -101,7 +109,7 @@ function createApiServer() {
   app.use(_rateLimit(120));
   app.use(authMiddleware);
 
-  // ── Auth ──────────────────────────────────────────────────────────────────
+  // ── Auth ───────────────────────────────────────────────────────────
   app.post("/auth/login", (req, res) => {
     const { key } = req.body || {};
     const cfgKey  = config.dashboard && config.dashboard.apiKey;
@@ -111,7 +119,7 @@ function createApiServer() {
     res.json({ success: true, token: cfgKey });
   });
 
-  // ── SSE live stream ───────────────────────────────────────────────────────
+  // ── SSE live stream ───────────────────────────────────────────────────
   app.get("/stream", (req, res) => {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
@@ -122,19 +130,19 @@ function createApiServer() {
     req.on("close", () => _sseClients.delete(res));
   });
 
-  // ── Health ────────────────────────────────────────────────────────────────
+  // ── Health ──────────────────────────────────────────────────────────
   app.get("/health", (req, res) => {
     const hs = health.snapshot();
     if (!botApi) return res.json({ status: botStatus, botName: config.bot.name, version: config.bot.version, ...hs });
-    res.json({ status: "online", botName: config.bot.name, version: config.bot.version, uptime: Math.floor((Date.now() - startTime) / 1000), groupCount: groupsCache.size, lockedCount: lockedThreads.size, mutedCount: mutedThreads.size, ...hs });
+    res.json({ status: "online", botName: config.bot.name, version: config.bot.version, uptime: Math.floor((Date.now() - startTime) / 1000), groupCount: groupsCache.size, lockedCount: lockedThreads.size, ...hs });
   });
 
-  // ── Overview ──────────────────────────────────────────────────────────────
+  // ── Overview ──────────────────────────────────────────────────────────
   app.get("/overview", (req, res) => {
     const hs = health.snapshot();
     let totalMessages = 0, totalCommands = 0;
     for (const s of groupStats.values()) { totalMessages += s.messageCount || 0; totalCommands += s.commandCount || 0; }
-    res.json({ status: botStatus, botName: config.bot.name, version: config.bot.version, uptime: botApi ? Math.floor((Date.now() - startTime) / 1000) : 0, groupCount: groupsCache.size, lockedCount: lockedThreads.size, mutedCount: mutedThreads.size, totalMessages, totalCommands, health: hs, humanSim: humanSimulator.status(), recentActivity: activityLog.slice(-10).reverse() });
+    res.json({ status: botStatus, botName: config.bot.name, version: config.bot.version, uptime: botApi ? Math.floor((Date.now() - startTime) / 1000) : 0, groupCount: groupsCache.size, lockedCount: lockedThreads.size, totalMessages, totalCommands, ...hs });
   });
 
   app.get("/diagnostics", (req, res) => res.json(diagnostics.report()));
@@ -144,7 +152,7 @@ function createApiServer() {
     res.json({ success: true, file: file ? path.basename(file) : null });
   });
 
-  // ── Commands ──────────────────────────────────────────────────────────────
+  // ── Commands ──────────────────────────────────────────────────────────
   app.get("/commands", (req, res) => {
     const COMMANDS_DIR = path.join(__dirname, "commands");
     const list = [];
@@ -160,7 +168,7 @@ function createApiServer() {
     res.json(list.sort((a, b) => a.name.localeCompare(b.name)));
   });
 
-  // ── Config ────────────────────────────────────────────────────────────────
+  // ── Config ──────────────────────────────────────────────────────────
   app.get("/config", (req, res) => {
     const safe = JSON.parse(JSON.stringify(config));
     if (safe.credentials) { safe.credentials.email = safe.credentials.email ? "***" : ""; safe.credentials.password = ""; }
@@ -178,7 +186,7 @@ function createApiServer() {
     res.json({ success: true, features: config.features });
   });
 
-  // ── Human simulator ───────────────────────────────────────────────────────
+  // ── Human simulator ───────────────────────────────────────────────────
   app.get("/humansim",  (req, res) => res.json(humanSimulator.status()));
   app.put("/humansim",  (req, res) => {
     const { enabled, presenceIntervalMs, typingIntervalMs, readIntervalMs } = req.body;
@@ -187,7 +195,7 @@ function createApiServer() {
     res.json({ success: true, status: humanSimulator.status() });
   });
 
-  // ── Cookies — live refresh status & force-push ────────────────────────────
+  // ── Cookies — live refresh status & force-push ────────────────────────
   app.get("/cookies/status", (req, res) => {
     if (!_cookieRefresher) return res.json({ active: false, message: "Bot not connected yet." });
     const s = _cookieRefresher.status();
@@ -210,14 +218,14 @@ function createApiServer() {
     }
   });
 
-  // ── Groups ────────────────────────────────────────────────────────────────
+  // ── Groups ──────────────────────────────────────────────────────────
   app.get("/groups", (req, res) => {
     const groups = [];
     for (const [threadID, info] of groupsCache.entries()) {
       const muteExpiry = mutedThreads.get(threadID);
       const stats      = groupStats.get(threadID) || {};
       const ar         = autoReplies.get(threadID);
-      groups.push({ threadID, name: info.name || threadID, memberCount: info.memberCount || 0, isLocked: lockedThreads.has(threadID), isMuted: muteExpiry != null && Date.now() < muteExpiry, muteExpiresAt: muteExpiry || null, lastSeen: info.lastSeen || 0, messageCount: stats.messageCount || 0, commandCount: stats.commandCount || 0, hasAutoReply: !!(ar && ar.enabled) });
+      groups.push({ threadID, name: info.name || threadID, memberCount: info.memberCount || 0, isLocked: lockedThreads.has(threadID), isMuted: muteExpiry != null && Date.now() < muteExpiry, muteExpiresAt: muteExpiry || null, messageCount: stats.messageCount || 0, commandCount: stats.commandCount || 0, autoReplyEnabled: ar?.enabled || false, lastSeen: info.lastSeen || 0 });
     }
     groups.sort((a, b) => b.lastSeen - a.lastSeen);
     res.json(groups);
@@ -232,7 +240,7 @@ function createApiServer() {
       const stats  = groupStats.get(threadID) || {};
       const muteExpiry = mutedThreads.get(threadID);
       const ar = autoReplies.get(threadID);
-      res.json({ threadID, name: info.name || cached.name || threadID, memberCount: (info.participantIDs || []).length, adminCount: (info.adminIDs || []).length, isLocked: lockedThreads.has(threadID), isMuted: muteExpiry != null && Date.now() < muteExpiry, muteExpiresAt: muteExpiry || null, lastSeen: cached.lastSeen || 0, messageCount: stats.messageCount || 0, commandCount: stats.commandCount || 0, hasAutoReply: !!(ar && ar.enabled), autoReplyMsg: ar ? ar.message : null, emoji: info.emoji || null, color: info.color || null });
+      res.json({ threadID, name: info.name || cached.name || threadID, memberCount: (info.participantIDs || []).length, adminCount: (info.adminIDs || []).length, isLocked: lockedThreads.has(threadID), isMuted: muteExpiry != null && Date.now() < muteExpiry, muteExpiresAt: muteExpiry || null, messageCount: stats.messageCount || 0, commandCount: stats.commandCount || 0, autoReplyEnabled: ar?.enabled || false });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -303,7 +311,7 @@ function createApiServer() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  // ── Auto-reply ────────────────────────────────────────────────────────────
+  // ── Auto-reply ─────────────────────────────────────────────────────────
   app.get("/groups/:threadID/autoreply", (req, res) => {
     const ar = autoReplies.get(req.params.threadID);
     if (!ar) return res.json({ enabled: false, message: "", cooldownMinutes: 30 });
@@ -328,7 +336,7 @@ function createApiServer() {
     res.json({ success: true });
   });
 
-  // ── Pending ───────────────────────────────────────────────────────────────
+  // ── Pending ──────────────────────────────────────────────────────────
   app.get("/pending", async (req, res) => {
     if (!botApi) return res.status(503).json({ error: "Bot not connected" });
     try {
@@ -347,7 +355,7 @@ function createApiServer() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  // ── Broadcast ─────────────────────────────────────────────────────────────
+  // ── Broadcast ─────────────────────────────────────────────────────────
   app.post("/broadcast", async (req, res) => {
     const message = sanitize(req.body.message, 2000);
     const targets = Array.isArray(req.body.threadIDs) ? req.body.threadIDs : [...groupsCache.keys()];
@@ -362,7 +370,7 @@ function createApiServer() {
     res.json({ success: true, sent, failed });
   });
 
-  // ── AppState / Cookies ────────────────────────────────────────────────────
+  // ── AppState / Cookies ────────────────────────────────────────────────
   app.get("/appstate/info", (req, res) => {
     const appStatePath = path.resolve(__dirname, config.appStatePath);
     try {
@@ -381,7 +389,8 @@ function createApiServer() {
       if (!Array.isArray(data) || data.length === 0) return res.status(400).json({ error: "Invalid appstate format" });
       const appStatePath = path.resolve(__dirname, config.appStatePath);
       const { SessionManager } = require("./utils/session");
-      const sm = new SessionManager(appStatePath, process.env.GITHUB_PERSONAL_ACCESS_TOKEN || "", "marwanbou540-gif/messenger-bot");
+      const ghConfig = _getGitHubConfig();
+      const sm = new SessionManager(appStatePath, ghConfig.token, ghConfig.repo);
       const ok = await sm.saveAndPush(data);
       if (!ok) return res.status(500).json({ error: "Failed to save state" });
       logActivitySSE("AppState uploaded and pushed via dashboard");
@@ -389,14 +398,14 @@ function createApiServer() {
     } catch (e) { res.status(400).json({ error: "Invalid JSON: " + e.message }); }
   });
 
-  // ── State persistence ─────────────────────────────────────────────────────
+  // ── State persistence ─────────────────────────────────────────────────
   app.post("/state/save", (req, res) => {
     saveState();
     logActivitySSE("State manually saved via dashboard");
     res.json({ success: true });
   });
 
-  // ── Restart ───────────────────────────────────────────────────────────────
+  // ── Restart ──────────────────────────────────────────────────────────
   app.post("/restart", async (req, res) => {
     res.json({ success: true, message: "Restarting in 2 seconds..." });
     logActivitySSE("Restart triggered via dashboard");
@@ -405,7 +414,8 @@ function createApiServer() {
         const state = botApi.getAppState();
         if (Array.isArray(state) && state.length > 0) {
           const { SessionManager } = require("./utils/session");
-          const s = new SessionManager(path.resolve(__dirname, config.appStatePath), process.env.GITHUB_PERSONAL_ACCESS_TOKEN || "", "marwanbou540-gif/messenger-bot");
+          const ghConfig = _getGitHubConfig();
+          const s = new SessionManager(path.resolve(__dirname, config.appStatePath), ghConfig.token, ghConfig.repo);
           s.save(state);
         }
       }
@@ -413,18 +423,18 @@ function createApiServer() {
     setTimeout(() => process.exit(0), 2000);
   });
 
-  // ── Logs & audit ──────────────────────────────────────────────────────────
+  // ── Logs & audit ────────────────────────────────────────────────────
   app.get("/activity",   (req, res) => res.json(activityLog.slice(-100).reverse()));
   app.get("/violations", (req, res) => res.json(lockViolations.slice(-100).reverse()));
 
-  // ── Reconnect ─────────────────────────────────────────────────────────────
+  // ── Reconnect ─────────────────────────────────────────────────────────
   app.post("/reconnect", (req, res) => {
     res.json({ success: true, message: "Reconnecting..." });
     logActivitySSE("Reconnect triggered via dashboard");
     setTimeout(() => process.exit(0), 1500);
   });
 
-  // ── Session aliases ───────────────────────────────────────────────────────
+  // ── Session aliases ──────────────────────────────────────────────────
   app.get("/session", (req, res) => {
     const appStatePath = path.resolve(__dirname, config.appStatePath);
     try {
@@ -467,7 +477,7 @@ function createApiServer() {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  // ── Config (full save) ────────────────────────────────────────────────────
+  // ── Config (full save) ────────────────────────────────────────────────
   app.post("/config", (req, res) => {
     const allowed = ["features", "humanSimulator", "loginOptions", "messages", "bot"];
     for (const k of allowed) { if (k in req.body) Object.assign(config[k], req.body[k]); }
@@ -478,14 +488,14 @@ function createApiServer() {
   app.get("/features",  (req, res) => res.json(config.features || {}));
   app.post("/features", (req, res) => { Object.assign(config.features, req.body); logActivitySSE("Features updated via dashboard"); res.json({ success: true }); });
 
-  // ── Security ──────────────────────────────────────────────────────────────
+  // ── Security ──────────────────────────────────────────────────────────
   const _secPath = path.join(__dirname, "data", "security.json");
   function _loadSec() { try { return JSON.parse(fs.readFileSync(_secPath, "utf8")); } catch { return {}; } }
   function _saveSec(d) { fs.mkdirSync(path.dirname(_secPath), { recursive: true }); fs.writeFileSync(_secPath, JSON.stringify(d, null, 2)); }
 
   app.get("/security", (req, res) => {
     const sec = _loadSec();
-    res.json({ antiSpamCooldownMs: config.features?.antiSpamCooldownMs ?? 3000, maxRequestsPerMinute: sec.maxRequestsPerMinute ?? 40, requestCooldownMs: sec.requestCooldownMs ?? 60000, maxConcurrentRequests: sec.maxConcurrentRequests ?? 5, bannedWords: sec.bannedWords ?? [] });
+    res.json({ antiSpamCooldownMs: config.features?.antiSpamCooldownMs ?? 3000, maxRequestsPerMinute: sec.maxRequestsPerMinute ?? 40, requestCooldownMs: sec.requestCooldownMs ?? 60000, maxConcurrentRequests: sec.maxConcurrentRequests ?? 3, bannedWords: sec.bannedWords ?? [] });
   });
 
   app.post("/security", (req, res) => {
@@ -500,7 +510,7 @@ function createApiServer() {
     res.json({ success: true });
   });
 
-  // ── Bans ──────────────────────────────────────────────────────────────────
+  // ── Bans ───────────────────────────────────────────────────────────
   const _bansPath = path.join(__dirname, "data", "bans.json");
   function _loadBans() { try { return JSON.parse(fs.readFileSync(_bansPath, "utf8")); } catch { return []; } }
   function _saveBans(d) { fs.mkdirSync(path.dirname(_bansPath), { recursive: true }); fs.writeFileSync(_bansPath, JSON.stringify(d, null, 2)); }
@@ -523,7 +533,7 @@ function createApiServer() {
     res.json({ success: true });
   });
 
-  // ── Audit log ─────────────────────────────────────────────────────────────
+  // ── Audit log ──────────────────────────────────────────────────────
   app.get("/audit", (req, res) => {
     const offset = parseInt(req.query.offset) || 0;
     const limit  = Math.min(parseInt(req.query.limit) || 50, 200);
@@ -531,7 +541,7 @@ function createApiServer() {
     res.json(all.slice(offset, offset + limit));
   });
 
-  // ── Jobs ──────────────────────────────────────────────────────────────────
+  // ── Jobs ───────────────────────────────────────────────────────────
   const _activeJobs = new Map();
   app.get("/jobs", (req, res) => { const jobs = []; for (const [id, j] of _activeJobs) jobs.push({ id, ...j }); res.json(jobs); });
   app.delete("/jobs/:id", (req, res) => {
@@ -542,7 +552,7 @@ function createApiServer() {
     res.json({ success: true });
   });
 
-  // ── Allowlist ─────────────────────────────────────────────────────────────
+  // ── Allowlist ──────────────────────────────────────────────────────
   const _alPath = path.join(__dirname, "data", "allowlist.json");
   function _loadAl() { try { return JSON.parse(fs.readFileSync(_alPath, "utf8")); } catch { return { mode: "off", list: [] }; } }
   function _saveAl(d) { fs.mkdirSync(path.dirname(_alPath), { recursive: true }); fs.writeFileSync(_alPath, JSON.stringify(d, null, 2)); }
@@ -557,7 +567,7 @@ function createApiServer() {
     const d = _loadAl(); d.list = d.list.filter(x => x !== req.body.uid); _saveAl(d); res.json({ success: true });
   });
 
-  // ── Files (sandboxed) ─────────────────────────────────────────────────────
+  // ── Files (sandboxed) ──────────────────────────────────────────────
   const _editableFiles = [
     { name: "config.json",  path: "config.json",  icon: "⚙️" },
     { name: "index.js",     path: "index.js",     icon: "🚀" },
