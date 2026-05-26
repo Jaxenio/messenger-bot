@@ -10,8 +10,7 @@
   "bot": {
     "name": "Madox",
     "version": "2.1.0",
-    "61581395595194"
-    ],
+    "id": "61581395595194",
     "language": "en"
   },
   "features": {
@@ -41,9 +40,9 @@
   "messages": {
     "greet": "أهلاً {name}! 👋 مرحباً بك في المجموعة.",
     "farewell": "وداعاً {name}! نتمنى لك التوفيق. 👋",
-    "commandNotFound": "❌  الأمر «{cmd}» غير موجود.\nاكتب {prefix}help لعرض قائمة الأوامر.",
-    "errorOccurred": "⚠️  حدث خطأ أثناء تنفيذ الأمر. حاول مرة أخرى.",
-    "botRestarted": "✅  تم استعادة جلسة البوت بنجاح!"
+    "commandNotFound": "❌ الأمر «{cmd}» غير موجود.\nاكتب {prefix}help لعرض قائمة الأوامر.",
+    "errorOccurred": "⚠️ حدث خطأ أثناء تنفيذ الأمر. حاول مرة أخرى.",
+    "botRestarted": "✅ تم استعادة جلسة البوت بنجاح!"
   },
   "loginOptions": {
     "online": true,
