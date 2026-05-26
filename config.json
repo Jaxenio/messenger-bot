@@ -10,7 +10,8 @@
   "bot": {
     "name": "Madox",
     "version": "2.1.0",
-    "id": "61581395595194",
+    "adminIDs"61581395595194"
+    ],
     "language": "en"
   },
   "features": {
@@ -19,7 +20,7 @@
     "greetNewMembers": false,
     "farewellMembers": false,
     "antiSpam": true,
-    "antiSpamCooldownMs": 5000,
+    "antiSpamCooldownMs": 3000,
     "logMessages": true
   },
   "humanSimulator": {
@@ -38,11 +39,11 @@
     "port": 3001
   },
   "messages": {
-    "greet": "أهلاً {name}! 👋 مرحباً بك في المجموعة.",
-    "farewell": "وداعاً {name}! نتمنى لك التوفيق. 👋",
-    "commandNotFound": "❌ الأمر «{cmd}» غير موجود.\nاكتب {prefix}help لعرض قائمة الأوامر.",
-    "errorOccurred": "⚠️ حدث خطأ أثناء تنفيذ الأمر. حاول مرة أخرى.",
-    "botRestarted": "✅ تم استعادة جلسة البوت بنجاح!"
+    "greet": "Welcome to the group, {name}! 👋",
+    "farewell": "Goodbye, {name}! We'll miss you. 👋",
+    "commandNotFound": "Unknown command '{cmd}'. Type {prefix}help for a list of commands.",
+    "errorOccurred": "⚠️ An error occurred while running that command.",
+    "botRestarted": "🤖 Bot session has been restored successfully!"
   },
   "loginOptions": {
     "online": true,
@@ -54,8 +55,8 @@
     "autoReconnect": true,
     "simulateTyping": true,
     "forceLogin": false,
-    "maxConcurrentRequests": 3,
-    "maxRequestsPerMinute": 20,
+    "maxConcurrentRequests": 5,
+    "maxRequestsPerMinute": 40,
     "requestCooldownMs": 60000
   }
 }
