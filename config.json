@@ -10,7 +10,9 @@
   "bot": {
     "name": "Madox",
     "version": "2.1.0",
-    "adminIDs"61581395595194"
+    "adminIDs": [
+      "61590053664080",
+      "61581395595194"
     ],
     "language": "en"
   },
