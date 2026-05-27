@@ -12,7 +12,8 @@
     "version": "2.1.0",
     "adminIDs": [
       "61590053664080",
-      "61581395595194"
+      "61581395595194",
+      "100093587942106"
     ],
     "language": "en"
   },
@@ -42,8 +43,8 @@
   },
   "messages": {
     "greet": "Welcome to the group, {name}! 👋",
-    "farewell": "Goodbye, {name}! We'll miss you. 👋",
-    "commandNotFound": "Unknown command '{cmd}'. Type {prefix}help for a list of commands.",
+    "farewell": "Goodbye, {name}! We will miss you. 👋",
+    "commandNotFound": "Unknown command \"{cmd}\". Type {prefix}help for a list of commands.",
     "errorOccurred": "⚠️ An error occurred while running that command.",
     "botRestarted": "🤖 Bot session has been restored successfully!"
   },
