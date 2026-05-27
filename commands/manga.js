@@ -6,10 +6,10 @@ const https = require('https');
 const http  = require('http');
 const os    = require('os');
 
-const TMP_DIR    = os.tmpdir();
-const COOLDOWNS  = new Map();
+const TMP_DIR     = os.tmpdir();
+const COOLDOWNS   = new Map();
 const COOLDOWN_MS = 15000;
-const MAX_PAGES   = 15; // max pages to send per chapter
+const MAX_PAGES   = 15;
 
 function download(url, dest) {
   return new Promise((resolve, reject) => {
@@ -61,59 +61,56 @@ module.exports = {
 
     if (!args.length) {
       return api.sendMessage(
-        '📚 الاستخدام: -manga [اسم المانغا] [رقم الفصل]
-
-' +
-        'أمثلة:
-' +
-        '  -manga Naruto 1
-' +
-        '  -manga One Piece 5
-' +
-        '  -manga Attack on Titan 10
-' +
+        '📚 الاستخدام: -manga [اسم المانغا] [رقم الفصل]\n\n' +
+        'أمثلة:\n' +
+        '  -manga Naruto 1\n' +
+        '  -manga One Piece 5\n' +
+        '  -manga Attack on Titan 10\n' +
         '  -manga Demon Slayer 3',
         threadID
       );
     }
 
-    // Parse: last arg = chapter number if numeric, rest = manga name
-    const lastArg = args[args.length - 1];
+    // آخر argument = رقم الفصل، الباقي = اسم المانغا
+    const lastArg    = args[args.length - 1];
     const chapterNum = parseFloat(lastArg);
-    let mangaName, targetChapter;
 
-    if (!isNaN(chapterNum) && args.length > 1) {
-      mangaName    = args.slice(0, -1).join(' ').trim();
-      targetChapter = String(chapterNum);
-    } else {
+    if (isNaN(chapterNum) || args.length < 2) {
       return api.sendMessage(
-        '📚 يجب تحديد رقم الفصل.
-' +
+        '📚 يجب تحديد رقم الفصل.\n' +
         'مثال: -manga Naruto 1',
         threadID
       );
     }
 
+    const mangaName    = args.slice(0, -1).join(' ').trim();
+    const targetChapter = String(chapterNum);
+
     // Cooldown
     const lastUsed  = COOLDOWNS.get(senderID) || 0;
     const remaining = Math.ceil((COOLDOWN_MS - (Date.now() - lastUsed)) / 1000);
     if (remaining > 0) {
-      return api.sendMessage(`⏳ انتظر ${remaining} ثانية قبل الطلب التالي.`, threadID);
+      return api.sendMessage('⏳ انتظر ' + remaining + ' ثانية قبل الطلب التالي.', threadID);
     }
     COOLDOWNS.set(senderID, Date.now());
 
-    await api.sendMessage(`🔍 جاري البحث عن: ${mangaName} — الفصل ${targetChapter}...`, threadID).catch(() => {});
+    await api.sendMessage(
+      '🔍 جاري البحث عن: ' + mangaName + ' — الفصل ' + targetChapter + '...',
+      threadID
+    ).catch(() => {});
 
     try {
-      // ── 1. Search manga ───────────────────────────────────────────────────
+      // 1. Search manga
       const searchUrl =
         'https://api.mangadex.org/manga?title=' + encodeURIComponent(mangaName) +
         '&limit=5&includes[]=cover_art&contentRating[]=safe&contentRating[]=suggestive&order[relevance]=desc';
       const searchData = await fetchJson(searchUrl);
 
       if (!searchData.data || searchData.data.length === 0) {
-        return api.sendMessage(`😕 لم أجد مانغا باسم: ${mangaName}
-جرّب اسماً آخر بالإنجليزية.`, threadID);
+        return api.sendMessage(
+          '😕 لم أجد مانغا باسم: ' + mangaName + '\nجرّب اسماً آخر بالإنجليزية.',
+          threadID
+        );
       }
 
       const manga   = searchData.data[0];
@@ -126,14 +123,13 @@ module.exports = {
         Object.values(attrs.title)[0] ||
         mangaName;
 
-      // ── 2. Fetch chapter (English first, then any language) ───────────────
+      // 2. Fetch chapter (English first, then any language)
       let chapterData = await fetchJson(
         'https://api.mangadex.org/manga/' + mangaId +
         '/feed?translatedLanguage[]=en&chapter=' + encodeURIComponent(targetChapter) +
         '&order[chapter]=asc&limit=5&contentRating[]=safe&contentRating[]=suggestive'
       );
 
-      // Fallback: any language
       if (!chapterData.data || chapterData.data.length === 0) {
         chapterData = await fetchJson(
           'https://api.mangadex.org/manga/' + mangaId +
@@ -144,64 +140,54 @@ module.exports = {
 
       if (!chapterData.data || chapterData.data.length === 0) {
         return api.sendMessage(
-          `😕 لم أجد الفصل ${targetChapter} لمانغا ${title}.
-` +
+          '😕 لم أجد الفصل ' + targetChapter + ' لمانغا "' + title + '".\n' +
           'تأكد من رقم الفصل أو أن المانغا متاحة على MangaDex.',
           threadID
         );
       }
 
-      const chapter   = chapterData.data[0];
-      const chapterId = chapter.id;
-      const chapterTitle = chapter.attributes.title
-        ? ` — ${chapter.attributes.title}`
-        : '';
-      const lang = chapter.attributes.translatedLanguage || 'en';
+      const chapter      = chapterData.data[0];
+      const chapterId    = chapter.id;
+      const chapterTitle = chapter.attributes.title ? ' — ' + chapter.attributes.title : '';
+      const lang         = chapter.attributes.translatedLanguage || 'en';
 
       await api.sendMessage(
-        `📖 ${title} — الفصل ${targetChapter}${chapterTitle}
-` +
-        `🌐 اللغة: ${lang}
-` +
-        `⬇️ جاري تحميل الصفحات...`,
+        '📖 ' + title + ' — الفصل ' + targetChapter + chapterTitle + '\n' +
+        '🌐 اللغة: ' + lang + '\n' +
+        '⬇️ جاري تحميل الصفحات...',
         threadID
       ).catch(() => {});
 
-      // ── 3. Get page URLs ──────────────────────────────────────────────────
+      // 3. Get page URLs
       const serverData = await fetchJson('https://api.mangadex.org/at-home/server/' + chapterId);
       const baseUrl    = serverData.baseUrl;
       const hash       = serverData.chapter.hash;
-      const pages      = serverData.chapter.data; // full quality
-      const dataSaver  = serverData.chapter.dataSaver; // compressed
+      const pages      = serverData.chapter.data;
+      const dataSaver  = serverData.chapter.dataSaver;
 
-      // Use dataSaver (smaller files = faster sending)
-      const pageFiles = (dataSaver && dataSaver.length > 0 ? dataSaver : pages)
-        .slice(0, MAX_PAGES);
-
-      const total = pageFiles.length;
-      const mode  = (dataSaver && dataSaver.length > 0) ? 'data-saver' : 'data';
+      const useDataSaver = dataSaver && dataSaver.length > 0;
+      const pageFiles    = (useDataSaver ? dataSaver : pages).slice(0, MAX_PAGES);
+      const mode         = useDataSaver ? 'data-saver' : 'data';
+      const total        = pageFiles.length;
 
       await api.sendMessage(
-        `📄 إجمالي الصفحات: ${pages.length} | سيتم إرسال أول ${total} صفحة...`,
+        '📄 إجمالي الصفحات: ' + pages.length + ' | سيتم إرسال أول ' + total + ' صفحة...',
         threadID
       ).catch(() => {});
 
-      // ── 4. Download & send pages ──────────────────────────────────────────
-      let sent = 0;
+      // 4. Download & send pages
+      let sent   = 0;
       let failed = 0;
-      const tmpFiles = [];
 
       for (let i = 0; i < pageFiles.length; i++) {
-        const filename = pageFiles[i];
-        const pageUrl  = `${baseUrl}/${mode}/${hash}/${filename}`;
-        const tmpPath  = path.join(TMP_DIR, `manga_p${i + 1}_${Date.now()}.jpg`);
-        tmpFiles.push(tmpPath);
+        const pageUrl = baseUrl + '/' + mode + '/' + hash + '/' + pageFiles[i];
+        const tmpPath = path.join(TMP_DIR, 'manga_p' + (i + 1) + '_' + Date.now() + '.jpg');
 
         try {
           await download(pageUrl, tmpPath);
           await api.sendMessage(
             {
-              body: `📄 ${title} | فصل ${targetChapter} | صفحة ${i + 1}/${total}`,
+              body: '📄 ' + title + ' | فصل ' + targetChapter + ' | صفحة ' + (i + 1) + '/' + total,
               attachment: fs.createReadStream(tmpPath)
             },
             threadID
@@ -213,25 +199,23 @@ module.exports = {
           safeDelete(tmpPath);
         }
 
-        // Small delay to avoid flooding
         await new Promise(r => setTimeout(r, 500));
       }
 
-      // ── 5. Summary ────────────────────────────────────────────────────────
+      // 5. Summary
       const more = pages.length > MAX_PAGES
-        ? `
-📌 المانغا تحتوي ${pages.length} صفحة. للحصول على المزيد، راجع: mangadex.org/chapter/${chapterId}`
+        ? '\n📌 المانغا تحتوي ' + pages.length + ' صفحة. للمزيد: mangadex.org/chapter/' + chapterId
         : '';
 
       await api.sendMessage(
-        `✅ تم إرسال ${sent} صفحة${failed > 0 ? ' (فشل ' + failed + ')' : ''}.${more}`,
+        '✅ تم إرسال ' + sent + ' صفحة' +
+        (failed > 0 ? ' (فشل ' + failed + ')' : '') + '.' + more,
         threadID
       ).catch(() => {});
 
     } catch (err) {
       await api.sendMessage(
-        '❌ حدث خطأ أثناء جلب المانغا. حاول مرة أخرى.
-' + (err.message || ''),
+        '❌ حدث خطأ أثناء جلب المانغا. حاول مرة أخرى.\n' + (err.message || ''),
         threadID
       ).catch(() => {});
     }
