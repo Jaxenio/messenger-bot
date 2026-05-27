@@ -45,6 +45,27 @@ async function fetchJson(url) {
   });
 }
 
+// جلب كل فصول المانغا مع pagination
+async function fetchAllChapters(mangaId) {
+  const allChapters = [];
+  let offset = 0;
+  const limit = 500;
+
+  while (true) {
+    const url =
+      'https://api.mangadex.org/manga/' + mangaId +
+      '/feed?order[chapter]=asc&limit=' + limit + '&offset=' + offset;
+    const data = await fetchJson(url);
+    if (!data.data || data.data.length === 0) break;
+    allChapters.push(...data.data);
+    if (allChapters.length >= (data.total || allChapters.length)) break;
+    if (data.data.length < limit) break;
+    offset += limit;
+  }
+
+  return allChapters;
+}
+
 function safeDelete(p) {
   try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch {}
 }
@@ -64,8 +85,8 @@ module.exports = {
         '📚 الاستخدام: -manga [اسم المانغا] [رقم الفصل]\n\n' +
         'أمثلة:\n' +
         '  -manga Naruto 1\n' +
+        '  -manga Blue Lock 2\n' +
         '  -manga One Piece 5\n' +
-        '  -manga Attack on Titan 10\n' +
         '  -manga Demon Slayer 3',
         threadID
       );
@@ -83,7 +104,7 @@ module.exports = {
       );
     }
 
-    const mangaName    = args.slice(0, -1).join(' ').trim();
+    const mangaName     = args.slice(0, -1).join(' ').trim();
     const targetChapter = String(chapterNum);
 
     // Cooldown
@@ -101,14 +122,14 @@ module.exports = {
 
     try {
       // 1. Search manga
-      const searchUrl =
+      const searchData = await fetchJson(
         'https://api.mangadex.org/manga?title=' + encodeURIComponent(mangaName) +
-        '&limit=5&includes[]=cover_art&contentRating[]=safe&contentRating[]=suggestive&order[relevance]=desc';
-      const searchData = await fetchJson(searchUrl);
+        '&limit=5&includes[]=cover_art&contentRating[]=safe&contentRating[]=suggestive&order[relevance]=desc'
+      );
 
       if (!searchData.data || searchData.data.length === 0) {
         return api.sendMessage(
-          '😕 لم أجد مانغا باسم: ' + mangaName + '\nجرّب اسماً آخر بالإنجليزية.',
+          '😕 لم أجد مانغا باسم: ' + mangaName + '\nجرّب اسماً بالإنجليزية.',
           threadID
         );
       }
@@ -123,30 +144,44 @@ module.exports = {
         Object.values(attrs.title)[0] ||
         mangaName;
 
-      // 2. Fetch chapter (English first, then any language)
-      let chapterData = await fetchJson(
-        'https://api.mangadex.org/manga/' + mangaId +
-        '/feed?translatedLanguage[]=en&chapter=' + encodeURIComponent(targetChapter) +
-        '&order[chapter]=asc&limit=5&contentRating[]=safe&contentRating[]=suggestive'
+      // 2. جلب كل الفصول والبحث عن الفصل المطلوب بالرقم
+      const allChapters = await fetchAllChapters(mangaId);
+
+      // الفلترة: نبحث عن الفصل المطلوب بالضبط
+      const matching = allChapters.filter(
+        c => parseFloat(c.attributes.chapter) === chapterNum
       );
 
-      if (!chapterData.data || chapterData.data.length === 0) {
-        chapterData = await fetchJson(
-          'https://api.mangadex.org/manga/' + mangaId +
-          '/feed?chapter=' + encodeURIComponent(targetChapter) +
-          '&order[chapter]=asc&limit=5&contentRating[]=safe&contentRating[]=suggestive'
-        );
-      }
+      if (matching.length === 0) {
+        // نبحث عن الفصول المتاحة لمساعدة المستخدم
+        const available = [...new Set(
+          allChapters.map(c => c.attributes.chapter).filter(Boolean)
+        )].slice(0, 20).join(', ');
 
-      if (!chapterData.data || chapterData.data.length === 0) {
         return api.sendMessage(
-          '😕 لم أجد الفصل ' + targetChapter + ' لمانغا "' + title + '".\n' +
-          'تأكد من رقم الفصل أو أن المانغا متاحة على MangaDex.',
+          '😕 الفصل ' + targetChapter + ' غير متاح لـ "' + title + '".\n' +
+          (available ? '📋 فصول متاحة: ' + available + '\nاستخدم -chapters ' + mangaName + ' لرؤية القائمة الكاملة.' : ''),
           threadID
         );
       }
 
-      const chapter      = chapterData.data[0];
+      // نفضّل الإنجليزية، ثم أي لغة غير خارجية
+      const nonExternal = matching.filter(c => !c.attributes.externalUrl);
+      const enChapter   = nonExternal.find(c => c.attributes.translatedLanguage === 'en');
+      const chapter     = enChapter || nonExternal[0] || matching[0];
+
+      // 3. الفصل خارجي (لا توجد صفحات مستضافة على MangaDex)
+      if (chapter.attributes.externalUrl) {
+        const extUrl = chapter.attributes.externalUrl;
+        return api.sendMessage(
+          '📖 ' + title + ' — الفصل ' + targetChapter + '\n' +
+          '⚠️ هذا الفصل مستضاف على موقع رسمي خارجي.\n' +
+          '🔗 اقرأه هنا: ' + extUrl,
+          threadID
+        );
+      }
+
+      // 4. فصل داخلي — جلب الصفحات
       const chapterId    = chapter.id;
       const chapterTitle = chapter.attributes.title ? ' — ' + chapter.attributes.title : '';
       const lang         = chapter.attributes.translatedLanguage || 'en';
@@ -158,7 +193,6 @@ module.exports = {
         threadID
       ).catch(() => {});
 
-      // 3. Get page URLs
       const serverData = await fetchJson('https://api.mangadex.org/at-home/server/' + chapterId);
       const baseUrl    = serverData.baseUrl;
       const hash       = serverData.chapter.hash;
@@ -175,7 +209,7 @@ module.exports = {
         threadID
       ).catch(() => {});
 
-      // 4. Download & send pages
+      // 5. تحميل وإرسال الصفحات
       let sent   = 0;
       let failed = 0;
 
@@ -202,9 +236,9 @@ module.exports = {
         await new Promise(r => setTimeout(r, 500));
       }
 
-      // 5. Summary
+      // 6. ملخص
       const more = pages.length > MAX_PAGES
-        ? '\n📌 المانغا تحتوي ' + pages.length + ' صفحة. للمزيد: mangadex.org/chapter/' + chapterId
+        ? '\n📌 الفصل يحتوي ' + pages.length + ' صفحة. للمزيد: mangadex.org/chapter/' + chapterId
         : '';
 
       await api.sendMessage(
