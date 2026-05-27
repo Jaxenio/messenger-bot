@@ -1,19 +1,20 @@
 'use strict';
 
-const fs   = require('fs');
-const path = require('path');
+const fs    = require('fs');
+const path  = require('path');
 const https = require('https');
 const http  = require('http');
 const os    = require('os');
 
-const TMP_DIR = os.tmpdir();
-const COOLDOWNS = new Map();
-const COOLDOWN_MS = 8000;
+const TMP_DIR    = os.tmpdir();
+const COOLDOWNS  = new Map();
+const COOLDOWN_MS = 15000;
+const MAX_PAGES   = 15; // max pages to send per chapter
 
 function download(url, dest) {
   return new Promise((resolve, reject) => {
     const proto = url.startsWith('https') ? https : http;
-    const file = fs.createWriteStream(dest);
+    const file  = fs.createWriteStream(dest);
     proto.get(url, { headers: { 'User-Agent': 'MangaBot/1.0' } }, (res) => {
       if (res.statusCode === 301 || res.statusCode === 302) {
         file.close();
@@ -44,130 +45,192 @@ async function fetchJson(url) {
   });
 }
 
+function safeDelete(p) {
+  try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch {}
+}
+
 module.exports = {
   name: 'manga',
-  aliases: ['مانغا', 'مانجا', 'anime', 'انمي', 'أنمي'],
-  description: 'البحث عن مانغا وإرسال صورة غلافها ومعلوماتها.',
-  usage: 'manga [اسم المانغا]',
+  aliases: ['مانغا', 'مانجا'],
+  description: 'البحث عن مانغا وإرسال صفحات فصل محدد.',
+  usage: 'manga [اسم المانغا] [رقم الفصل]',
   category: 'Entertainment',
 
   async execute({ api, event, args }) {
     const { threadID, senderID } = event;
-    const query = args.join(' ').trim();
 
-    if (!query) {
+    if (!args.length) {
       return api.sendMessage(
-        '📚 الاستخدام: -manga [اسم المانغا أو الأنمي]
+        '📚 الاستخدام: -manga [اسم المانغا] [رقم الفصل]
+
 ' +
         'أمثلة:
 ' +
-        '  -manga Naruto
+        '  -manga Naruto 1
 ' +
-        '  -manga One Piece
+        '  -manga One Piece 5
 ' +
-        '  -manga Attack on Titan
+        '  -manga Attack on Titan 10
 ' +
-        '  -manga مانغا بلاك كلوفر',
+        '  -manga Demon Slayer 3',
+        threadID
+      );
+    }
+
+    // Parse: last arg = chapter number if numeric, rest = manga name
+    const lastArg = args[args.length - 1];
+    const chapterNum = parseFloat(lastArg);
+    let mangaName, targetChapter;
+
+    if (!isNaN(chapterNum) && args.length > 1) {
+      mangaName    = args.slice(0, -1).join(' ').trim();
+      targetChapter = String(chapterNum);
+    } else {
+      return api.sendMessage(
+        '📚 يجب تحديد رقم الفصل.
+' +
+        'مثال: -manga Naruto 1',
         threadID
       );
     }
 
     // Cooldown
-    const lastUsed = COOLDOWNS.get(senderID) || 0;
+    const lastUsed  = COOLDOWNS.get(senderID) || 0;
     const remaining = Math.ceil((COOLDOWN_MS - (Date.now() - lastUsed)) / 1000);
     if (remaining > 0) {
-      return api.sendMessage(`⏳ انتظر ${remaining} ثانية قبل البحث مجدداً.`, threadID);
+      return api.sendMessage(`⏳ انتظر ${remaining} ثانية قبل الطلب التالي.`, threadID);
     }
     COOLDOWNS.set(senderID, Date.now());
 
-    await api.sendMessage(`🔍 جاري البحث عن: ${query}...`, threadID).catch(() => {});
+    await api.sendMessage(`🔍 جاري البحث عن: ${mangaName} — الفصل ${targetChapter}...`, threadID).catch(() => {});
 
     try {
-      // Search MangaDex
-      const searchUrl = `https://api.mangadex.org/manga?title=${encodeURIComponent(query)}&limit=5&includes[]=cover_art&includes[]=author&contentRating[]=safe&contentRating[]=suggestive&order[relevance]=desc`;
+      // ── 1. Search manga ───────────────────────────────────────────────────
+      const searchUrl =
+        'https://api.mangadex.org/manga?title=' + encodeURIComponent(mangaName) +
+        '&limit=5&includes[]=cover_art&contentRating[]=safe&contentRating[]=suggestive&order[relevance]=desc';
       const searchData = await fetchJson(searchUrl);
 
       if (!searchData.data || searchData.data.length === 0) {
-        return api.sendMessage(`😕 لم أجد نتائج لـ: ${query}
+        return api.sendMessage(`😕 لم أجد مانغا باسم: ${mangaName}
 جرّب اسماً آخر بالإنجليزية.`, threadID);
       }
 
-      const manga = searchData.data[0];
+      const manga   = searchData.data[0];
       const mangaId = manga.id;
-      const attrs = manga.attributes;
-
-      // Get title
-      const title =
+      const attrs   = manga.attributes;
+      const title   =
         attrs.title['en'] ||
         attrs.title['ja-ro'] ||
         attrs.title['ja'] ||
         Object.values(attrs.title)[0] ||
-        query;
+        mangaName;
 
-      // Get description
-      const desc =
-        (attrs.description && (attrs.description['en'] || attrs.description['ar'] || Object.values(attrs.description)[0])) || '';
-      const shortDesc = desc.length > 200 ? desc.slice(0, 200) + '...' : desc;
+      // ── 2. Fetch chapter (English first, then any language) ───────────────
+      let chapterData = await fetchJson(
+        'https://api.mangadex.org/manga/' + mangaId +
+        '/feed?translatedLanguage[]=en&chapter=' + encodeURIComponent(targetChapter) +
+        '&order[chapter]=asc&limit=5&contentRating[]=safe&contentRating[]=suggestive'
+      );
 
-      // Get status and year
-      const status = attrs.status || 'unknown';
-      const year   = attrs.year || '—';
-      const statusAr = { ongoing: 'مستمرة', completed: 'مكتملة', hiatus: 'متوقفة', cancelled: 'ملغاة' };
-
-      // Get cover filename
-      const coverRel = manga.relationships.find(r => r.type === 'cover_art');
-      const authorRel = manga.relationships.find(r => r.type === 'author');
-      const coverFile = coverRel && coverRel.attributes ? coverRel.attributes.fileName : null;
-      const authorName = authorRel && authorRel.attributes ? authorRel.attributes.name : '—';
-
-      // Get genres
-      const genres = (attrs.tags || [])
-        .filter(t => t.attributes.group === 'genre')
-        .slice(0, 4)
-        .map(t => t.attributes.name.en || Object.values(t.attributes.name)[0])
-        .join(', ') || '—';
-
-      const caption =
-        `📚 ${title}
-` +
-        `✍️ المؤلف: ${authorName}
-` +
-        `📅 السنة: ${year}
-` +
-        `📊 الحالة: ${statusAr[status] || status}
-` +
-        `🏷️ التصنيفات: ${genres}
-` +
-        (shortDesc ? `
-📖 ${shortDesc}
-` : '') +
-        `
-🔗 mangadex.org/title/${mangaId}`;
-
-      if (!coverFile) {
-        return api.sendMessage(caption, threadID);
+      // Fallback: any language
+      if (!chapterData.data || chapterData.data.length === 0) {
+        chapterData = await fetchJson(
+          'https://api.mangadex.org/manga/' + mangaId +
+          '/feed?chapter=' + encodeURIComponent(targetChapter) +
+          '&order[chapter]=asc&limit=5&contentRating[]=safe&contentRating[]=suggestive'
+        );
       }
 
-      // Download cover image
-      const coverUrl = `https://uploads.mangadex.org/covers/${mangaId}/${coverFile}.512.jpg`;
-      const imgPath  = path.join(TMP_DIR, `manga_${Date.now()}.jpg`);
-
-      try {
-        await download(coverUrl, imgPath);
-        await api.sendMessage(
-          { body: caption, attachment: fs.createReadStream(imgPath) },
+      if (!chapterData.data || chapterData.data.length === 0) {
+        return api.sendMessage(
+          `😕 لم أجد الفصل ${targetChapter} لمانغا ${title}.
+` +
+          'تأكد من رقم الفصل أو أن المانغا متاحة على MangaDex.',
           threadID
         );
-      } catch {
-        // Send without image if download fails
-        await api.sendMessage(caption, threadID);
-      } finally {
-        if (fs.existsSync(imgPath)) fs.unlink(imgPath, () => {});
       }
+
+      const chapter   = chapterData.data[0];
+      const chapterId = chapter.id;
+      const chapterTitle = chapter.attributes.title
+        ? ` — ${chapter.attributes.title}`
+        : '';
+      const lang = chapter.attributes.translatedLanguage || 'en';
+
+      await api.sendMessage(
+        `📖 ${title} — الفصل ${targetChapter}${chapterTitle}
+` +
+        `🌐 اللغة: ${lang}
+` +
+        `⬇️ جاري تحميل الصفحات...`,
+        threadID
+      ).catch(() => {});
+
+      // ── 3. Get page URLs ──────────────────────────────────────────────────
+      const serverData = await fetchJson('https://api.mangadex.org/at-home/server/' + chapterId);
+      const baseUrl    = serverData.baseUrl;
+      const hash       = serverData.chapter.hash;
+      const pages      = serverData.chapter.data; // full quality
+      const dataSaver  = serverData.chapter.dataSaver; // compressed
+
+      // Use dataSaver (smaller files = faster sending)
+      const pageFiles = (dataSaver && dataSaver.length > 0 ? dataSaver : pages)
+        .slice(0, MAX_PAGES);
+
+      const total = pageFiles.length;
+      const mode  = (dataSaver && dataSaver.length > 0) ? 'data-saver' : 'data';
+
+      await api.sendMessage(
+        `📄 إجمالي الصفحات: ${pages.length} | سيتم إرسال أول ${total} صفحة...`,
+        threadID
+      ).catch(() => {});
+
+      // ── 4. Download & send pages ──────────────────────────────────────────
+      let sent = 0;
+      let failed = 0;
+      const tmpFiles = [];
+
+      for (let i = 0; i < pageFiles.length; i++) {
+        const filename = pageFiles[i];
+        const pageUrl  = `${baseUrl}/${mode}/${hash}/${filename}`;
+        const tmpPath  = path.join(TMP_DIR, `manga_p${i + 1}_${Date.now()}.jpg`);
+        tmpFiles.push(tmpPath);
+
+        try {
+          await download(pageUrl, tmpPath);
+          await api.sendMessage(
+            {
+              body: `📄 ${title} | فصل ${targetChapter} | صفحة ${i + 1}/${total}`,
+              attachment: fs.createReadStream(tmpPath)
+            },
+            threadID
+          );
+          sent++;
+        } catch {
+          failed++;
+        } finally {
+          safeDelete(tmpPath);
+        }
+
+        // Small delay to avoid flooding
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      // ── 5. Summary ────────────────────────────────────────────────────────
+      const more = pages.length > MAX_PAGES
+        ? `
+📌 المانغا تحتوي ${pages.length} صفحة. للحصول على المزيد، راجع: mangadex.org/chapter/${chapterId}`
+        : '';
+
+      await api.sendMessage(
+        `✅ تم إرسال ${sent} صفحة${failed > 0 ? ' (فشل ' + failed + ')' : ''}.${more}`,
+        threadID
+      ).catch(() => {});
 
     } catch (err) {
       await api.sendMessage(
-        '❌ حدث خطأ أثناء البحث. حاول مرة أخرى.
+        '❌ حدث خطأ أثناء جلب المانغا. حاول مرة أخرى.
 ' + (err.message || ''),
         threadID
       ).catch(() => {});
