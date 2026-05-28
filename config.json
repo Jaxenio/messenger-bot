@@ -19,7 +19,7 @@
   },
   "features": {
     "autoSaveAppState": true,
-    "autoSaveIntervalMs": 900000,
+    "autoSaveIntervalMs": 600000,
     "greetNewMembers": false,
     "farewellMembers": false,
     "antiSpam": true,
@@ -30,11 +30,13 @@
     "_comment": "Human simulation — makes the account look like a real person to Facebook.",
     "enabled": true,
     "presenceIntervalMs": 300000,
-    "typingIntervalMs": 480000,
-    "readIntervalMs": 180000,
-    "jitterMs": 30000,
-    "maxTypingMs": 4000,
-    "maxGroupsPerCycle": 3
+    "typingIntervalMs": 600000,
+    "readIntervalMs": 240000,
+    "browseIntervalMs": 1200000,
+    "jitterMs": 60000,
+    "maxTypingMs": 5000,
+    "maxGroupsPerCycle": 4,
+    "browseBatchSize": 5
   },
   "dashboard": {
     "_comment": "Dashboard API — set apiKey to a strong secret.",
@@ -58,8 +60,8 @@
     "autoReconnect": true,
     "simulateTyping": true,
     "forceLogin": false,
-    "maxConcurrentRequests": 5,
-    "maxRequestsPerMinute": 40,
-    "requestCooldownMs": 60000
+    "maxConcurrentRequests": 3,
+    "maxRequestsPerMinute": 25,
+    "requestCooldownMs": 90000
   }
 }
