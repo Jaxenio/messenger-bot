@@ -1,15 +1,19 @@
 "use strict";
 
 /**
- * musicEngine v5
+ * musicEngine v6
  *
- * Download strategy (tries each in order until one succeeds):
- *   1. @distube/ytdl-core  — Node.js YouTube client, handles bot-detection natively
- *   2. play-dl stream      — alternative YouTube stream path
- *   3. yt-dlp              — binary, tries tv_embedded / mediaconnect / web_creator clients
- *   4. SoundCloud          — completely different source, no bot-detection
+ * Download strategy (order changed — yt-dlp is now PRIMARY):
+ *   1. yt-dlp  — android_music / mweb / ios clients bypass bot-detection without PO token
+ *   2. @distube/ytdl-core  — fallback Node.js client
+ *   3. play-dl             — last-resort stream fallback
  *
- * Each step logs clearly so failures are visible in bot logs.
+ * Root cause of "Sign in to confirm you're not a bot" and "parsing watch.html":
+ *   YouTube's web player now requires a PO token tied to a browser session.
+ *   ytdl-core and play-dl both rely on the web player JS — the bot-detection layer.
+ *   yt-dlp's android_music / mweb clients use the Innertube API directly and do
+ *   NOT require a PO token, making them immune to the web-player bot check.
+ *   Solution: run yt-dlp first; keep ytdl-core / play-dl only as emergency fallbacks.
  */
 
 const fs    = require("fs");
@@ -66,7 +70,6 @@ function _findFfmpeg() {
   for (const p of candidates) {
     try { if (fs.statSync(p).isFile()) return p; } catch {}
   }
-  // ffmpeg-static: bundled binary from npm (no system install needed)
   try {
     const staticPath = require("ffmpeg-static");
     if (staticPath && fs.existsSync(staticPath)) return staticPath;
@@ -143,15 +146,15 @@ function _pipeToMp3(readable, outPath) {
 
 // ── yt-dlp helpers ────────────────────────────────────────────────────────────
 const YTDLP_CACHED = path.join(TMP_DIR, "yt-dlp");
-let _ytdlpPath          = null;
-let _preferredYtdlpClient = null; // Last yt-dlp client that succeeded; tried first next time
+let _ytdlpPath            = null;
+let _preferredYtdlpClient = null;
 
 function _spawnAsync(cmd, args, { timeout = 60_000 } = {}) {
   return new Promise((resolve, reject) => {
     let done = false;
-    const proc  = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
-    const out   = [];
-    const err   = [];
+    const proc = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const out  = [];
+    const err  = [];
     proc.stdout.on("data", d => out.push(d));
     proc.stderr.on("data", d => err.push(d));
     proc.on("error", e => { if (!done) { done = true; reject(e); } });
@@ -332,85 +335,43 @@ async function searchYouTubeMusic(query) {
   };
 }
 
-// ── Download method 1: @distube/ytdl-core ────────────────────────────────────
-async function _dlYtdlCore(url, outPath) {
-  const ytdl  = require("@distube/ytdl-core");
-  // createAgent with an empty cookie jar still sets up proper undici pooling;
-  // the full browser-like headers below are what actually reduce bot flags.
-  const agent = ytdl.createAgent([], { pipelining: 1 });
-  const stream = ytdl(url, {
-    filter:  "audioonly",
-    quality: "highestaudio",
-    agent,
-    requestOptions: {
-      headers: {
-        // Impersonate a real Chrome browser on Windows — matches what YouTube sees
-        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Accept":          "*/*",
-        "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        // Coming from YouTube Music specifically matters for bot scoring
-        "Origin":          "https://music.youtube.com",
-        "Referer":         "https://music.youtube.com/",
-        "Sec-Fetch-Dest":  "empty",
-        "Sec-Fetch-Mode":  "cors",
-        "Sec-Fetch-Site":  "same-site",
-        "Connection":      "keep-alive",
-      },
-    },
-  });
-  await withTimeout(_pipeToMp3(stream, outPath), DOWNLOAD_TIMEOUT, "ytdl-core download");
-}
-
-// ── Download method 2: play-dl stream ────────────────────────────────────────
-async function _dlPlayDl(url, outPath) {
-  // Try quality 0 (highest) first, then fall back to quality 2 (lowest latency)
-  let source;
-  try {
-    source = await withTimeout(play.stream(url, { quality: 0 }), SEARCH_TIMEOUT + 5_000, "play-dl stream q0");
-  } catch {
-    source = await withTimeout(play.stream(url, { quality: 2 }), SEARCH_TIMEOUT + 5_000, "play-dl stream q2");
-  }
-  await withTimeout(_pipeToMp3(source.stream, outPath), DOWNLOAD_TIMEOUT, "play-dl pipe");
-}
-
-// ── Download method 3: yt-dlp with bot-bypass clients ────────────────────────
+// ── Download method 1 (PRIMARY): yt-dlp ──────────────────────────────────────
 //
-// Root cause of "Sign in to confirm you're not a bot":
-//   YouTube's web player now requires a PO token tied to the visitor session.
-//   The fix is to use the ANDROID_MUSIC / ANDROID_VR Innertube clients, which
-//   call the API directly and do NOT require a PO token or JS player execution.
+// WHY yt-dlp IS FIRST:
+//   YouTube's PO (Proof of Origin) token requirement broke all Node.js YouTube
+//   clients (ytdl-core, play-dl) because they depend on executing the web
+//   player JavaScript where the token challenge lives.
 //
-// Key flag:  --extractor-args "youtube:player_client=android_music;player_skip=configs,js"
-//   player_client=android_music  → use Android YouTube Music API (no bot check)
-//   player_skip=configs,js       → skip fetching the web player JS (where the
-//                                  bot detection triggers); android clients don't
-//                                  need it since they use the Innertube API directly.
+//   yt-dlp's android_music / mweb / ios clients use the Innertube API directly:
+//     android_music → YouTube Music Innertube endpoint, no PO token, no JS
+//     mweb          → Mobile web client, lighter bot scoring, no PO required
+//     ios           → iOS Innertube, no PO token needed
+//
+//   Key flags:
+//     --extractor-args "youtube:player_client=android_music;player_skip=configs,js"
+//       player_client=android_music → Innertube API, bypasses web bot check
+//       player_skip=configs,js      → Don't fetch/execute the JS player at all
+//     --retries 3 --fragment-retries 3  → handle transient errors
 //
 async function _dlYtDlp(url, outPath) {
   const bin    = await withTimeout(_ensureYtDlp(), 95_000, "تجهيز yt-dlp");
   const ffmpeg = _findFfmpeg();
   const base   = outPath.endsWith(".mp3") ? outPath.slice(0, -4) : outPath;
 
-  // Ordered by effectiveness against bot detection (2025):
-  //   android_music / android_vr → Innertube, no PO token needed → most reliable
-  //   ios                        → Innertube, no PO token needed
-  //   android                    → fallback
-  //   web_embedded               → embedded player, lighter bot scoring
-  //   tv_embedded                → TV client, also lighter
+  // Ordered by reliability in 2025 (Innertube/mobile clients first):
   const CLIENTS = [
-    // [clientName, playerSkip]
-    // android* and ios use Innertube directly — skip JS player entirely
+    // Innertube clients — no PO token, no JS player, highest success rate
     ["android_music", "configs,js"],
     ["android_vr",    "configs,js"],
+    ["mweb",          "configs,js"],  // ← new: mobile web, very reliable
     ["ios",           "configs,js"],
     ["android",       "configs,js"],
-    // web clients: still need configs but we can skip js
+    // Web clients — need configs but we can skip JS processing
     ["web_embedded",  "js"],
     ["tv_embedded",   "js"],
+    ["mweb_safari",   "js"],          // ← new: Safari mobile, different fingerprint
   ];
 
-  // android clients produce .m4a/.webm; ios also does; web can do more formats
   const FORMAT_CHAINS = ["bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio", "18"];
   const RAW_EXTS      = ["m4a", "webm", "opus", "aac", "mp4", "ogg"];
 
@@ -420,9 +381,11 @@ async function _dlYtDlp(url, outPath) {
     "--force-ipv4", "--geo-bypass",
     "--no-check-certificates",
     "--socket-timeout", "30",
+    "--retries", "3",              // ← retry on transient failures
+    "--fragment-retries", "3",     // ← retry partial fragment downloads
+    "--no-update",                 // ← don't check for updates mid-download
   ];
 
-  // Try the last-successful client first so repeat plays skip the trial phase
   const sortedClients = _preferredYtdlpClient
     ? [
         ...CLIENTS.filter(([c]) => c === _preferredYtdlpClient),
@@ -436,7 +399,6 @@ async function _dlYtDlp(url, outPath) {
   outer:
   for (const [client, skip] of sortedClients) {
     for (const fmt of FORMAT_CHAINS) {
-      // Clean up any partial output from a previous attempt
       for (const ext of RAW_EXTS) { try { fs.unlinkSync(`${base}.${ext}`); } catch {} }
 
       logger.info("MusicEngine", `yt-dlp client="${client}" fmt="${fmt}"`);
@@ -444,7 +406,6 @@ async function _dlYtDlp(url, outPath) {
         await withTimeout(
           _spawnAsync(bin, [
             ...YTDLP_BASE,
-            // THE KEY FIX — android/ios clients + skip JS player = no bot check
             "--extractor-args", `youtube:player_client=${client};player_skip=${skip}`,
             "-f", fmt,
             "-o", `${base}.%(ext)s`,
@@ -457,7 +418,6 @@ async function _dlYtDlp(url, outPath) {
           if (fs.existsSync(fp) && fs.statSync(fp).size > 10_240) { rawFile = fp; break; }
         }
         if (rawFile) {
-          // Remember which client worked so we try it first next time
           _preferredYtdlpClient = client;
           break outer;
         }
@@ -470,7 +430,7 @@ async function _dlYtDlp(url, outPath) {
   }
 
   if (!rawFile) {
-    _preferredYtdlpClient = null; // All failed — reset so next call tries fresh
+    _preferredYtdlpClient = null;
     throw new Error(lastErr?.message || "yt-dlp: all clients failed");
   }
 
@@ -491,45 +451,58 @@ async function _dlYtDlp(url, outPath) {
   }
 }
 
-// ── Download method 4: SoundCloud (completely different source) ───────────────
-async function _dlSoundCloud(query, outPath) {
-  const results = await withTimeout(
-    play.search(query, { source: { soundcloud: "tracks" }, limit: 5 }),
-    SEARCH_TIMEOUT,
-    "SoundCloud search"
-  );
-  if (!results || !results.length) throw new Error("SoundCloud: no results for: " + query);
+// ── Download method 2 (FALLBACK): @distube/ytdl-core ─────────────────────────
+async function _dlYtdlCore(url, outPath) {
+  const ytdl  = require("@distube/ytdl-core");
+  const agent = ytdl.createAgent([], { pipelining: 1 });
+  const stream = ytdl(url, {
+    filter:  "audioonly",
+    quality: "highestaudio",
+    agent,
+    requestOptions: {
+      headers: {
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept":          "*/*",
+        "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Origin":          "https://music.youtube.com",
+        "Referer":         "https://music.youtube.com/",
+        "Sec-Fetch-Dest":  "empty",
+        "Sec-Fetch-Mode":  "cors",
+        "Sec-Fetch-Site":  "same-site",
+        "Connection":      "keep-alive",
+      },
+    },
+  });
+  await withTimeout(_pipeToMp3(stream, outPath), DOWNLOAD_TIMEOUT, "ytdl-core download");
+}
 
-  const track  = results[0];
-  const source = await withTimeout(
-    play.stream(track.url),
-    SEARCH_TIMEOUT + 5_000,
-    "SoundCloud stream"
-  );
-
-  await withTimeout(_pipeToMp3(source.stream, outPath), DOWNLOAD_TIMEOUT, "SoundCloud pipe");
-
-  return {
-    title:    track.name || query,
-    artist:   track.user?.name || "",
-    duration: track.durationInMs ? _msToTimestamp(track.durationInMs) : "",
-    provider: "soundcloud",
-  };
+// ── Download method 3 (LAST RESORT): play-dl stream ──────────────────────────
+async function _dlPlayDl(url, outPath) {
+  let source;
+  try {
+    source = await withTimeout(play.stream(url, { quality: 0 }), SEARCH_TIMEOUT + 5_000, "play-dl stream q0");
+  } catch {
+    source = await withTimeout(play.stream(url, { quality: 2 }), SEARCH_TIMEOUT + 5_000, "play-dl stream q2");
+  }
+  await withTimeout(_pipeToMp3(source.stream, outPath), DOWNLOAD_TIMEOUT, "play-dl pipe");
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
  * downloadYouTube(url, outPath)
- * Tries ytdl-core → play-dl → yt-dlp.
- * Throws if all three fail.
- * Returns the method that succeeded (for logging).
+ *
+ * Order: yt-dlp (PRIMARY) → ytdl-core → play-dl
+ *
+ * yt-dlp is first because it uses Innertube API directly (android_music/mweb/ios
+ * clients) which bypasses YouTube's PO token bot-detection entirely.
  */
 async function downloadYouTube(url, outPath) {
   const methods = [
-    { name: "ytdl-core", fn: () => _dlYtdlCore(url, outPath) },
-    { name: "play-dl",   fn: () => _dlPlayDl(url, outPath)   },
-    { name: "yt-dlp",    fn: () => _dlYtDlp(url, outPath)    },
+    { name: "yt-dlp",    fn: () => _dlYtDlp(url, outPath)    },  // PRIMARY — Innertube, no PO token
+    { name: "ytdl-core", fn: () => _dlYtdlCore(url, outPath) },  // FALLBACK
+    { name: "play-dl",   fn: () => _dlPlayDl(url, outPath)   },  // LAST RESORT
   ];
 
   const errors = [];
@@ -555,11 +528,25 @@ async function downloadYouTube(url, outPath) {
 /**
  * downloadSoundCloud(query, outPath)
  * Searches SoundCloud and downloads. Returns track info.
- * Used as last-resort fallback when all YouTube methods fail.
  */
 async function downloadSoundCloud(query, outPath) {
-  logger.info("MusicEngine", `SoundCloud fallback: "${query}"`);
-  return _dlSoundCloud(query, outPath);
+  logger.info("MusicEngine", `SoundCloud: "${query}"`);
+  const results = await withTimeout(
+    play.search(query, { source: { soundcloud: "tracks" }, limit: 5 }),
+    SEARCH_TIMEOUT, "SoundCloud search"
+  );
+  if (!results || !results.length) throw new Error("SoundCloud: no results for: " + query);
+  const track  = results[0];
+  const source = await withTimeout(
+    play.stream(track.url), SEARCH_TIMEOUT + 5_000, "SoundCloud stream"
+  );
+  await withTimeout(_pipeToMp3(source.stream, outPath), DOWNLOAD_TIMEOUT, "SoundCloud pipe");
+  return {
+    title:    track.name || query,
+    artist:   track.user?.name || "",
+    duration: track.durationInMs ? _msToTimestamp(track.durationInMs) : "",
+    provider: "soundcloud",
+  };
 }
 
 // ── File validation ───────────────────────────────────────────────────────────
