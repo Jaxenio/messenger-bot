@@ -429,6 +429,15 @@ function startBot() {
     setBotApi(api);
     threadScanner.setApi(api);
     setBotStatus("online");
+    // Register internal restart handler — used by -restart command instead of process.exit()
+    restartSignal.setCallback(() => {
+      logger.info('Bot', 'Restart signal received — reconnecting internally...');
+      setBotStatus('offline — restarting...');
+      cookieRefresher.stop();
+      humanSimulator.stop();
+      if (_mqttWatchdog) { clearInterval(_mqttWatchdog); _mqttWatchdog = null; }
+      setTimeout(startBot, 3000);
+    });
     nicknameLocks.setApi(api);
     health.setLoginOk(true);
     health.setMqttOk(true);
