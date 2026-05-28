@@ -43,6 +43,17 @@ antiSpam.configure(config.features.antiSpamCooldownMs);
 // ── Startup checks ────────────────────────────────────────────────────────────
 startupSelfCheck(APP_STATE_PATH);
 scheduleMaintenance();
+// Clean stale tmp files from previous runs (manga/music pages)
+try {
+  const _os = require('os');
+  const _tmpDir = _os.tmpdir();
+  const _cutoff = Date.now() - 2 * 60 * 60 * 1000;
+  for (const _f of fs.readdirSync(_tmpDir)) {
+    if (!_f.startsWith('manga_') && !_f.startsWith('music_')) continue;
+    try { const _fp = path.join(_tmpDir, _f); if (fs.statSync(_fp).mtimeMs < _cutoff) fs.unlinkSync(_fp); } catch {}
+  }
+} catch {}
+
 
 // ── Health watchdog ───────────────────────────────────────────────────────────
 health.start({
