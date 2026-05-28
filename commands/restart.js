@@ -1,15 +1,16 @@
 "use strict";
 
-const fs     = require("fs");
-const path   = require("path");
-const config = require("../config.json");
+const fs            = require("fs");
+const path          = require("path");
+const config        = require("../config.json");
+const restartSignal = require("../utils/restartSignal");
 
 const APP_STATE_PATH = path.resolve(__dirname, "..", config.appStatePath);
 
 module.exports = {
   name: "restart",
   aliases: ["reboot", "rs"],
-  description: "حفظ الكوكيز وإعادة تشغيل البوت.",
+  description: "حفظ الكوكيز وإعادة الاتصال بالبوت داخلياً.",
   usage: "restart",
   category: "Admin",
   adminOnly: true,
@@ -17,11 +18,14 @@ module.exports = {
   async execute({ api, event }) {
     const { threadID } = event;
 
-    await api.sendMessage(
-      "🔄 جارٍ حفظ الجلسة وإعادة التشغيل...\nسيعود البوت خلال ثوانٍ.",
-      threadID
-    ).catch(() => {});
+    if (!restartSignal.isReady()) {
+      return api.sendMessage(
+        "⚠️ البوت غير مهيأ بعد أو الاتصال مقطوع. حاول بعد ثوانٍ.",
+        threadID
+      ).catch(() => {});
+    }
 
+    // 1. حفظ الكوكيز الحالية قبل الإعادة
     try {
       const state = api.getAppState();
       if (Array.isArray(state) && state.length > 0) {
@@ -29,7 +33,14 @@ module.exports = {
       }
     } catch {}
 
-    // Railway restarts the process automatically on exit
-    setTimeout(() => process.exit(0), 1500);
+    // 2. إشعار المستخدم
+    await api.sendMessage(
+      "🔄 جارٍ إعادة الاتصال...\nسيعود البوت خلال 5-10 ثوانٍ.",
+      threadID
+    ).catch(() => {});
+
+    // 3. تشغيل إعادة الاتصال الداخلية بعد 1.5 ثانية
+    //    (نترك وقتاً لإرسال الرسالة أولاً)
+    setTimeout(() => restartSignal.trigger(), 1500);
   },
 };
