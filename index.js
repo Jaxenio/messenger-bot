@@ -20,6 +20,7 @@ const diagnostics        = require("./utils/diagnostics");
 const { startupSelfCheck, schedule: scheduleMaintenance } = require("./utils/maintenance");
 const humanSimulator     = require("./utils/humanSimulator");
 const cookieRefresher    = require("./utils/cookieRefresher");
+const restartSignal      = require('./utils/restartSignal');
 const msgQueue           = require("./utils/msgQueue");
 const { login }          = require("@neoaz07/nkxfca");
 
